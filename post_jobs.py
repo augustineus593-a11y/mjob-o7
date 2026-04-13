@@ -1,9 +1,9 @@
 """
-Kuvukiland Job Bot v3
-- Extracts REAL structured fields from each article
-- No duplicate content, no hardcoded defaults shown
-- Smart posting: skips runs with no new jobs
-- No TinyURL — direct URLs with Facebook rich preview
+Kuvukiland Job Bot v4
+- Strict field extraction — no CSS/junk values ever shown
+- All extracted values validated before use
+- Falls back gracefully: only shows fields actually found and clean
+- Smart scheduling, no TinyURL, direct URLs
 """
 
 import os, re, time, requests, random
@@ -70,6 +70,24 @@ MONTH_MAP = {
     "aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
 }
 
+# Characters that should NEVER appear in a valid extracted field value
+JUNK_CHARS = re.compile(r'[{}\[\]<>@#*=;]')
+
+# A valid extracted value must:
+# - be at least 2 chars
+# - not contain junk characters
+# - not look like CSS/HTML/code
+def is_clean_value(val):
+    if not val or len(val.strip()) < 2:
+        return False
+    if JUNK_CHARS.search(val):
+        return False
+    if any(x in val.lower() for x in ['height:','width:','margin:','padding:','font-',
+                                        'color:','display:','position:','overflow:',
+                                        'px','em;','auto;','100%','!important']):
+        return False
+    return True
+
 
 def parse_date_str(s):
     s = s.strip()
@@ -98,70 +116,140 @@ def is_expired(date_str):
 
 
 # ─────────────────────────────────────────────
-# ARTICLE DETAIL EXTRACTOR
+# ARTICLE DETAIL EXTRACTOR — strict validation
 # ─────────────────────────────────────────────
 def extract_article_details(url):
     details = {}
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
-        clean = re.sub(r'<[^>]+>', ' ', r.text)
+
+        # Step 1: remove script and style blocks entirely
+        html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', r.text, flags=re.DOTALL|re.I)
+
+        # Step 2: strip remaining tags
+        clean = re.sub(r'<[^>]+>', ' ', html)
         clean = re.sub(r'&[a-z#0-9]+;', ' ', clean)
         clean = re.sub(r'\s+', ' ', clean).strip()
 
-        field_patterns = {
-            "company": [
-                r'(?:Company|Employer|Organisation|Organization)\s*[:\-]\s*([^|\n\r]{3,70})',
-                r'(?:hosted by|offered by|provided by)\s+([^|\n\r]{3,60})',
-            ],
-            "location": [
-                r'Location\s*[:\-]\s*([^|\n\r]{3,80})',
-                r'(?:Province|City|Based in|Based at)\s*[:\-]\s*([^|\n\r]{3,60})',
-            ],
-            "closing_date": [
-                r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\d{1,2}\s+\w+\s+\d{4})',
-                r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})',
-                r'[Dd]eadline\s*[:\-]\s*(\d{1,2}\s+\w+\s+\d{4})',
-                r'[Aa]pply\s+[Bb]efore\s*[:\-]\s*(\d{1,2}\s+\w+\s+\d{4})',
-                r'[Cc]loses?\s+[Oo]n\s*[:\-]?\s*(\d{1,2}\s+\w+\s+\d{4})',
-            ],
-            "qualification": [
-                r'(?:Minimum\s+)?[Qq]ualification\s*[:\-]\s*([^|\n\r]{5,80})',
-                r'[Ee]ducation(?:al)?\s+[Rr]equirement\s*[:\-]\s*([^|\n\r]{5,80})',
-                r'[Mm]inimum\s+[Rr]equirement\s*[:\-]\s*([^|\n\r]{5,80})',
-            ],
-            "age": [
-                r'[Aa]ge\s+[Rr]equirement\s*[:\-]\s*([^|\n\r]{3,40})',
-                r'[Aa]ge\s*[:\-]\s*([^|\n\r]{3,30})',
-                r'[Aa]ged?\s+(\d{2}[\s\-]+\d{2}\s*years?)',
-                r'between\s+(\d{2}\s+and\s+\d{2}\s*years?)',
-                r'(\d{2}\s*[–\-]\s*\d{2}\s*years?)',
-            ],
-            "experience": [
-                r'[Ee]xperience\s+[Rr]equired\s*[:\-]\s*([^|\n\r]{3,60})',
-                r'[Ww]ork\s+[Ee]xperience\s*[:\-]\s*([^|\n\r]{3,60})',
-                r'((?:No|Entry[\s\-]?[Ll]evel)[^\n\r]{0,20}[Ee]xperience[^\n\r]{0,20})',
-            ],
-            "field": [
-                r'[Ii]ndustry\s*[:\-]\s*([^|\n\r]{3,60})',
-                r'[Ss]ector\s*[:\-]\s*([^|\n\r]{3,60})',
-            ],
-            "positions": [
-                r'\(X?\s*(\d+)\s*[Pp]osts?\)',
-                r'\(X?\s*(\d+)\s*[Pp]ositions?\)',
-                r'[Pp]ositions?\s+[Aa]vailable\s*[:\-]\s*([^|\n\r]{1,30})',
-                r'[Nn]umber\s+of\s+[Pp]osts?\s*[:\-]\s*([^|\n\r]{1,20})',
-            ],
-        }
+        # ── Strict field patterns ─────────────────────────────────
+        # Each pattern must capture a clean human-readable value
 
-        for field, pats in field_patterns.items():
-            for pat in pats:
-                m = re.search(pat, clean, re.I)
-                if m:
-                    val = m.group(1).strip() if m.lastindex and m.group(1) else m.group(0).strip()
-                    val = re.split(r'[|\r\n]', val)[0].strip()[:80]
-                    if len(val) > 2:
-                        details[field] = val
-                        break
+        # COMPANY
+        for pat in [
+            r'(?:Company|Employer|Organisation|Organization)\s*[:\-]\s*([A-Z][^\n\r|]{3,60})',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).split('|')[0].strip()[:70]
+                if is_clean_value(val):
+                    details["company"] = val
+                    break
+
+        # LOCATION — must look like a place name
+        for pat in [
+            r'Location\s*[:\-]\s*([A-Za-z][^\n\r|,]{3,60})',
+            r'Province\s*[:\-]\s*([A-Za-z][^\n\r|,]{3,40})',
+            r'City\s*[:\-]\s*([A-Za-z][^\n\r|,]{3,40})',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).split('|')[0].strip()[:60]
+                if is_clean_value(val) and not any(
+                    x in val.lower() for x in ['http','www','.co','click','apply']
+                ):
+                    details["location"] = val
+                    break
+
+        # CLOSING DATE — must parse to a real future date
+        for pat in [
+            r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Dd]eadline\s*[:\-]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Aa]pply\s+[Bb]efore\s*[:\-]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Cc]loses?\s+[Oo]n\s*[:\-]?\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).strip()
+                parsed = parse_date_str(val)
+                if parsed:
+                    details["closing_date"] = parsed.strftime("%d %B %Y")
+                    break
+
+        # QUALIFICATION — must mention matric/grade/diploma/certificate/degree
+        for pat in [
+            r'(?:Minimum\s+)?[Qq]ualification\s*[:\-]\s*([^\n\r|]{5,100})',
+            r'[Ee]ducation(?:al)?\s+[Rr]equirement\s*[:\-]\s*([^\n\r|]{5,80})',
+            r'[Mm]inimum\s+[Qq]ualification\s*[:\-]\s*([^\n\r|]{5,80})',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).split('|')[0].strip()[:80]
+                if is_clean_value(val) and any(
+                    x in val.lower() for x in
+                    ['grade','matric','diploma','certificate','degree','nqf','qualification']
+                ):
+                    details["qualification"] = val
+                    break
+
+        # AGE — must be purely numeric range like "18-35 years" or "18 to 35"
+        for pat in [
+            r'[Aa]ge\s+[Rr]equirement\s*[:\-]\s*(\d{2}\s*[\-–to]+\s*\d{2}\s*years?)',
+            r'[Aa]ge\s*[:\-]\s*(\d{2}\s*[\-–to]+\s*\d{2}\s*years?)',
+            r'[Aa]ged?\s+(\d{2}\s*[\-–to]+\s*\d{2}\s*years?)',
+            r'between\s+(\d{2}\s+and\s+\d{2}\s*years?)',
+            r'(\d{2}\s*[–\-]\s*\d{2}\s*years?\s*old)',
+            # also handle "18–29 years" appearing standalone
+            r'(\d{2}\s*[–\-]\s*\d{2}\s*years?)',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).strip()
+                # Must only contain digits, spaces, dashes, "years", "to", "old"
+                if re.match(r'^[\d\s\-–toalersy]+$', val, re.I) and is_clean_value(val):
+                    details["age"] = val
+                    break
+
+        # EXPERIENCE — must contain the word "experience" and be sensible
+        for pat in [
+            r'[Ee]xperience\s+[Rr]equired\s*[:\-]\s*([^\n\r|]{3,60})',
+            r'[Ww]ork\s+[Ee]xperience\s*[:\-]\s*([^\n\r|]{3,60})',
+            r'((?:No|Entry[\s\-]?[Ll]evel)\s+[Ee]xperience\s+[Rr]equired)',
+            r'(Entry\s+[Ll]evel)',
+            r'(No\s+[Ee]xperience\s+[Rr]equired)',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).split('|')[0].strip()[:60]
+                if is_clean_value(val):
+                    details["experience"] = val
+                    break
+
+        # INDUSTRY / FIELD
+        for pat in [
+            r'[Ii]ndustry\s*[:\-]\s*([A-Za-z][^\n\r|]{3,60})',
+            r'[Ss]ector\s*[:\-]\s*([A-Za-z][^\n\r|]{3,60})',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).split('|')[0].strip()[:60]
+                if is_clean_value(val):
+                    details["field"] = val
+                    break
+
+        # POSITIONS — must be a number or short phrase
+        for pat in [
+            r'\(X?\s*(\d+)\s*[Pp]osts?\)',
+            r'\(X?\s*(\d+)\s*[Pp]ositions?\)',
+            r'[Pp]ositions?\s+[Aa]vailable\s*[:\-]\s*(\d+)',
+            r'[Nn]umber\s+of\s+[Pp]osts?\s*[:\-]\s*(\d+)',
+        ]:
+            m = re.search(pat, clean, re.I)
+            if m:
+                val = m.group(1).strip()
+                if val.isdigit():
+                    details["positions"] = val
+                    break
 
     except Exception as e:
         print(f"   ⚠️  Extraction error: {e}")
@@ -170,7 +258,7 @@ def extract_article_details(url):
 
 
 # ─────────────────────────────────────────────
-# POST BUILDER — clean structured format
+# POST BUILDER
 # ─────────────────────────────────────────────
 SITE_SUFFIXES = re.compile(
     r'\s*[-|]\s*(Edupstairs|SA Learnership|Learnerships24|Youth Village|'
@@ -183,6 +271,7 @@ def build_post(title, details, direct_url, source):
 
     lines = ["🔌 Nasi iSpan 🚨", "", f"💼 {title}", ""]
 
+    # Company / Industry / Positions
     if details.get("company"):
         lines.append(f"🏢 Company: {details['company']}")
     if details.get("field"):
@@ -190,7 +279,11 @@ def build_post(title, details, direct_url, source):
     if details.get("positions"):
         lines.append(f"📌 Posts Available: {details['positions']}")
 
-    lines.append("")
+    # Only add blank line if we added something above
+    if any(k in details for k in ["company","field","positions"]):
+        lines.append("")
+
+    # Requirements block
     lines.append("📋 Requirements:")
 
     if details.get("qualification"):
@@ -203,11 +296,13 @@ def build_post(title, details, direct_url, source):
     else:
         lines.append("✔ Experience: Not required")
 
+    # Age ONLY if a clean value was found
     if details.get("age"):
         lines.append(f"✔ Age: {details['age']}")
 
     lines.append("")
 
+    # Location and closing date
     if details.get("location"):
         lines.append(f"📍 Location: {details['location']}")
     if details.get("closing_date"):
@@ -281,7 +376,9 @@ def make_key(title):
 def is_relevant(title, summary=""):
     text = (title + " " + summary).lower()
     has_job = any(k in text for k in GOOD_KEYWORDS)
-    has_act = any(k in text for k in ["apply","application","opportunity","hiring","available","2026","invited"])
+    has_act = any(k in text for k in [
+        "apply","application","opportunity","hiring","available","2026","invited"
+    ])
     has_bad = any(k in text for k in BAD_KEYWORDS)
     return has_job and has_act and not has_bad
 
@@ -339,11 +436,15 @@ def scrape_edupstairs():
         r = requests.get("https://www.edupstairs.org/", headers=HEADERS, timeout=20)
         if r.status_code != 200:
             return listings
-        links = re.findall(r'href=["\']((https?://www\.edupstairs\.org/[^"\'#?]+))["\']', r.text)
+        links = re.findall(
+            r'href=["\']((https?://www\.edupstairs\.org/[^"\'#?]+))["\']', r.text
+        )
         seen = set()
         for _, link in links:
             link = link.rstrip("/")
-            if any(x in link for x in ["/category/","/tag/","/page/","/author/","/feed",".jpg",".png"]):
+            if any(x in link for x in [
+                "/category/","/tag/","/page/","/author/","/feed",".jpg",".png"
+            ]):
                 continue
             if link in seen or len(link) < 40:
                 continue
@@ -361,7 +462,7 @@ def scrape_edupstairs():
 
 
 # ─────────────────────────────────────────────
-# FETCH ALL
+# FETCH ALL LISTINGS
 # ─────────────────────────────────────────────
 def fetch_all_listings():
     all_listings = []
@@ -386,7 +487,9 @@ def fetch_all_listings():
                 if not link:
                     continue
                 if is_relevant(title, summary):
-                    all_listings.append({"title": title[:120], "link": link, "source": src["source"]})
+                    all_listings.append({
+                        "title": title[:120], "link": link, "source": src["source"]
+                    })
                     accepted += 1
             print(f"    → {accepted} relevant")
             time.sleep(1.5)
@@ -411,7 +514,7 @@ def fetch_all_listings():
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    print(f"\n🤖 Kuvukiland Job Bot v3 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kuvukiland Job Bot v4 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml available\n" if LXML_AVAILABLE else "⚠️  lxml not available\n")
 
     already_posted = load_posted()
@@ -427,8 +530,6 @@ def main():
         print("⏸  No new jobs this run — nothing posted.")
         return
 
-    # Post 1 per run. Cron every 30min = max ~48 posts/day
-    # naturally throttled by how many NEW jobs exist
     MAX_PER_RUN = 1
     posted_count = 0
 
@@ -439,12 +540,12 @@ def main():
         key = make_key(listing["title"])
         print(f"📤 Processing: {listing['title'][:70]}")
         print(f"   URL: {listing['link'][:80]}")
-        print("   Extracting details from article page...")
+        print("   Extracting details...")
 
         details = extract_article_details(listing["link"])
         print(f"   Fields found: {list(details.keys())}")
 
-        # Skip expired
+        # Skip expired jobs
         closing = details.get("closing_date", "")
         if closing and is_expired(closing):
             print(f"   ❌ EXPIRED ({closing}) — skipping")
