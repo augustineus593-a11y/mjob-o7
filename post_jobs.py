@@ -1,11 +1,10 @@
 """
 Kuvukiland Job Bot v5
-- Smart multi-strategy field extraction that actually works
-- Reads real requirements from the article page
-- Handles varied page structures across different SA job sites
-- Falls back cleanly when fields can't be found
+- Posts up to 6 jobs per run (runs every 10 minutes via GitHub Actions)
+- Smart multi-strategy field extraction from real article pages
+- Reads actual requirements, location, closing date from each advert
+- Falls back cleanly when fields can't be found — never shows wrong info
 - Direct article URLs only, no bare domains posted
-- Runs every 10 minutes via GitHub Actions cron: '*/10 * * * *'
 """
 
 import os, re, time, requests, random
@@ -80,6 +79,9 @@ SITE_SUFFIXES = re.compile(
     re.I
 )
 
+# How many jobs to post per run (6 per run x every 10 min = ~6 per hour)
+MAX_PER_RUN = 6
+
 
 # ─────────────────────────────────────────────
 # DATE UTILITIES
@@ -114,6 +116,7 @@ def is_expired(date_str):
 # ─────────────────────────────────────────────
 
 def strip_html(html):
+    """Convert HTML to plain text, preserving list structure."""
     html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html, flags=re.DOTALL | re.I)
     html = re.sub(r'<br\s*/?>', '\n', html, flags=re.I)
     html = re.sub(r'<li[^>]*>', '\n• ', html, flags=re.I)
@@ -125,16 +128,16 @@ def strip_html(html):
 
 
 def find_section(text, *heading_patterns):
+    """Return up to 600 chars after the first matching heading."""
     for pat in heading_patterns:
         m = re.search(pat, text, re.I)
         if m:
-            start = m.end()
-            chunk = text[start:start + 600]
-            return chunk
+            return text[m.end():m.end() + 600]
     return ""
 
 
 def extract_bullets(section_text, max_items=6):
+    """Extract clean bullet/list items from a section of text."""
     items = []
     for line in section_text.split('\n'):
         line = line.strip().lstrip('•·-–*▪➤✔✓ ')
@@ -147,17 +150,21 @@ def extract_bullets(section_text, max_items=6):
 
 
 def extract_article_details(url):
+    """
+    Visit the article page and extract real job details.
+    Multi-strategy: labeled fields → requirements section → keyword scan.
+    """
     details = {}
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
-            print(f"   ⚠️  HTTP {r.status_code} when fetching article")
+            print(f"   ⚠️  HTTP {r.status_code} fetching article")
             return details
 
         plain = strip_html(r.text)
 
         # ── CLOSING DATE ─────────────────────────────────────────
-        date_patterns = [
+        for pat in [
             r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\d{1,2}[\s/\-]\w+[\s/\-]\d{4})',
             r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\w+\s+\d{1,2},?\s+\d{4})',
             r'[Dd]eadline\s*[:\-]\s*(\d{1,2}[\s/\-]\w+[\s/\-]\d{4})',
@@ -167,32 +174,28 @@ def extract_article_details(url):
             r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|'
             r'September|October|November|December)\s+202[567])',
             r'(\d{1,2}[\/\-]\d{1,2}[\/\-]202[567])',
-        ]
-        for pat in date_patterns:
+        ]:
             m = re.search(pat, plain, re.I)
             if m:
-                val = m.group(1).strip()
-                parsed = parse_date_str(val)
+                parsed = parse_date_str(m.group(1).strip())
                 if parsed:
                     details["closing_date"] = parsed.strftime("%d %B %Y")
                     details["closing_date_obj"] = parsed
                     break
 
         # ── LOCATION ─────────────────────────────────────────────
-        loc_patterns = [
+        for pat in [
             r'[Ll]ocation\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,60})',
             r'[Cc]ity\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Pp]rovince\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Pp]lace\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Ww]here\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,60})',
             r'[Bb]ased\s+[Ii]n\s*[:\-]?\s*([A-Za-z][^\n\r|,\.]{3,50})',
-            r'[Pp]ost(?:ed)?\s+[Ii]n\s*[:\-]?\s*([A-Za-z][^\n\r|,\.]{3,50})',
-        ]
-        for pat in loc_patterns:
+        ]:
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip().rstrip('.,;')
-                if (len(val) >= 3 and len(val) <= 60
+                if (3 <= len(val) <= 60
                         and not re.search(r'http|www|\.co|click|apply|salary|stipend', val, re.I)
                         and not re.search(r'[{}\[\]<>@#=;]', val)):
                     details["location"] = val
@@ -208,19 +211,18 @@ def extract_article_details(url):
             r'[Qq]ualifications?\s+[Rr]equired\s*[:\-]',
         )
         if req_section:
-            req_bullets = extract_bullets(req_section, max_items=6)
-            if req_bullets:
-                details["requirements"] = req_bullets
+            bullets = extract_bullets(req_section, max_items=5)
+            if bullets:
+                details["requirements"] = bullets
 
         # ── QUALIFICATION ─────────────────────────────────────────
-        qual_patterns = [
+        for pat in [
             r'[Qq]ualification\s*[:\-]\s*([^\n\r]{5,100})',
             r'[Ee]ducation(?:al\s+[Rr]equirement)?\s*[:\-]\s*([^\n\r]{5,80})',
             r'((?:Grade\s+12|Matric)[^\n\r]{0,80})',
             r'((?:National\s+(?:Senior|Certificate)|NSC)[^\n\r]{0,80})',
             r'((?:Diploma|Certificate|Degree|NQF)[^\n\r]{0,80})',
-        ]
-        for pat in qual_patterns:
+        ]:
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip()[:100]
@@ -233,7 +235,7 @@ def extract_article_details(url):
                     break
 
         # ── EXPERIENCE ───────────────────────────────────────────
-        exp_patterns = [
+        for pat in [
             r'[Ee]xperience\s+[Rr]equired\s*[:\-]\s*([^\n\r]{3,80})',
             r'[Ww]ork\s+[Ee]xperience\s*[:\-]\s*([^\n\r]{3,80})',
             r'[Ee]xperience\s*[:\-]\s*([^\n\r]{3,80})',
@@ -241,8 +243,7 @@ def extract_article_details(url):
             r'(Entry[\s\-][Ll]evel\s*[-–]\s*[Nn]o\s+[Ee]xperience)',
             r'(\d+\s*(?:year[s]?|yr[s]?)\s+(?:work\s+)?[Ee]xperience)',
             r'(\d+\s*[-–]\s*\d+\s*(?:year[s]?|yr[s]?)\s+[Ee]xperience)',
-        ]
-        for pat in exp_patterns:
+        ]:
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip()[:80]
@@ -251,14 +252,13 @@ def extract_article_details(url):
                     break
 
         # ── AGE ──────────────────────────────────────────────────
-        age_patterns = [
+        for pat in [
             r'[Aa]ge\s*[:\-]\s*(\d{2}\s*[-–to]+\s*\d{2}\s*years?)',
             r'[Aa]ged?\s+(\d{2}\s*[-–to]+\s*\d{2}\s*years?)',
             r'[Bb]etween\s+(\d{2}\s+and\s+\d{2}\s*years?)',
             r'(\d{2}\s*[-–]\s*\d{2}\s*years?\s*old)',
             r'(\d{2}\s*[-–]\s*\d{2}\s*years?)',
-        ]
-        for pat in age_patterns:
+        ]:
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip()
@@ -338,16 +338,8 @@ def build_post(title, details, direct_url, source):
 
     lines.append("")
 
-    if details.get("location"):
-        lines.append(f"📍 Location: {details['location']}")
-    else:
-        lines.append("📍 Location: See full advert")
-
-    if details.get("closing_date"):
-        lines.append(f"📅 Closing Date: {details['closing_date']}")
-    else:
-        lines.append("📅 Closing Date: See full advert")
-
+    lines.append(f"📍 Location: {details.get('location', 'See full advert')}")
+    lines.append(f"📅 Closing Date: {details.get('closing_date', 'See full advert')}")
     lines.append(f"🌐 Source: {source}")
     lines.append("")
     lines.append("👇 Click to read full details & apply:")
@@ -361,7 +353,6 @@ def build_post(title, details, direct_url, source):
         "#SouthAfrica #Matric #NoExperience #KuvukilandJobs "
         "#Internship #GovernmentJobs #SETA #Kuvukiland"
     )
-
     return "\n".join(lines)
 
 
@@ -593,19 +584,25 @@ def main():
         print("⏸  No new jobs this run — nothing posted.")
         return
 
-    for listing in new_jobs[:1]:   # post 1 per run
+    posted_count = 0
+
+    for listing in new_jobs:
+        if posted_count >= MAX_PER_RUN:
+            break
+
         key = make_key(listing["title"])
-        print(f"📤 Processing: {listing['title'][:70]}")
+        print(f"\n📤 [{posted_count + 1}/{MAX_PER_RUN}] Processing: {listing['title'][:65]}")
         print(f"   URL: {listing['link'][:80]}")
         print("   Extracting details...")
 
         details = extract_article_details(listing["link"])
 
+        # Skip if expired
         closing_obj = details.get("closing_date_obj")
         if closing_obj and closing_obj < datetime.now():
             print(f"   ❌ EXPIRED ({details.get('closing_date')}) — skipping")
             save_posted(key)
-            return
+            continue
 
         post = build_post(
             title=listing["title"],
@@ -621,7 +618,13 @@ def main():
         result = post_to_facebook(post, listing["link"])
         if result:
             save_posted(key)
-            print("✅ Done.")
+            posted_count += 1
+            print(f"✅ Posted {posted_count}/{MAX_PER_RUN}")
+            # Small delay between posts to avoid Facebook rate limits
+            if posted_count < MAX_PER_RUN:
+                time.sleep(5)
+
+    print(f"\n🏁 Run complete — {posted_count} post(s) published this run.")
 
 
 if __name__ == "__main__":
