@@ -1,10 +1,9 @@
 """
-Kuvukiland Job Bot v5
-- Posts up to 6 jobs per run (runs every 10 minutes via GitHub Actions)
-- Smart multi-strategy field extraction from real article pages
-- Reads actual requirements, location, closing date from each advert
-- Falls back cleanly when fields can't be found — never shows wrong info
-- Direct article URLs only, no bare domains posted
+Kuvukiland Job Bot v6
+- Requirements extracted exactly as written in the advertisement
+- Qualification match anchored to requirements section only (no footer junk)
+- Gossip/entertainment articles blocked
+- Posts up to 6 per run, runs every 10 minutes via GitHub Actions
 """
 
 import os, re, time, requests, random
@@ -53,6 +52,12 @@ BAD_KEYWORDS = [
     "looting", "crime", "convicted", "tender", "parliament",
     "survey", "guide to", "what is", "celebrating",
     "top 10", "list of", "here are", "everything you need", "2024",
+    # Entertainment / gossip / non-job content
+    "pens heartfelt", "last episode", "airs last", "smoke and mirrors",
+    "celebrity", "actress", "actor", "musician", "singer", "rapper",
+    "album", "movie", "telenovela", "soap opera", "reality show",
+    "dating", "relationship", "wedding", "divorce", "baby shower",
+    "instagram", "twitter beef", "throwback", "hairstyle", "fashion",
 ]
 
 RSS_SOURCES = [
@@ -79,8 +84,15 @@ SITE_SUFFIXES = re.compile(
     re.I
 )
 
-# How many jobs to post per run (6 per run x every 10 min = ~6 per hour)
 MAX_PER_RUN = 6
+
+# Footer/nav junk that should never appear in extracted values
+JUNK_PHRASES = [
+    'copyright', 'powered by', 'privacy policy', 'all rights reserved',
+    'cookie', 'subscribe', 'newsletter', 'follow us', 'share this',
+    'click here', 'read more', 'learn more', 'mcnitols', 'edupstairs',
+    'youth village', 'salearnership', 'learnerships24',
+]
 
 
 # ─────────────────────────────────────────────
@@ -111,48 +123,118 @@ def is_expired(date_str):
     return parsed < datetime.now() if parsed else False
 
 
+def is_junk(val):
+    """Return True if the value contains footer/nav garbage."""
+    v = val.lower()
+    return any(j in v for j in JUNK_PHRASES)
+
+
 # ─────────────────────────────────────────────
-# ARTICLE DETAIL EXTRACTOR
+# HTML → PLAIN TEXT
 # ─────────────────────────────────────────────
 
 def strip_html(html):
-    """Convert HTML to plain text, preserving list structure."""
-    html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html, flags=re.DOTALL | re.I)
-    html = re.sub(r'<br\s*/?>', '\n', html, flags=re.I)
+    """Convert HTML to clean plain text, preserving list structure with newlines."""
+    # Remove script/style blocks entirely
+    html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html,
+                  flags=re.DOTALL | re.I)
+    # Convert block elements to newlines so sections stay separated
+    html = re.sub(r'<(br|p|div|h[1-6]|section|article|header|footer|nav)[^>]*>',
+                  '\n', html, flags=re.I)
+    html = re.sub(r'</(p|div|h[1-6]|section|article|header|footer|nav)>',
+                  '\n', html, flags=re.I)
+    # Convert list items to bullet lines
     html = re.sub(r'<li[^>]*>', '\n• ', html, flags=re.I)
-    html = re.sub(r'<[^>]+>', ' ', html)
+    # Strip all remaining tags
+    html = re.sub(r'<[^>]+>', '', html)
+    # Decode HTML entities
     html = unescape(html)
-    html = re.sub(r'\s*\n\s*', '\n', html)
+    # Clean up whitespace
     html = re.sub(r'[ \t]+', ' ', html)
+    html = re.sub(r'\n[ \t]+', '\n', html)
+    html = re.sub(r'\n{3,}', '\n\n', html)
     return html.strip()
 
 
+def get_main_content(html):
+    """
+    Extract only the main article content, stripping header/footer/nav/sidebar.
+    This prevents footer text like 'Copyright © 2026. Created by Edupstairs'
+    from polluting extracted fields.
+    """
+    # Try to isolate the article body
+    for tag in [
+        r'<article[^>]*>(.*?)</article>',
+        r'<main[^>]*>(.*?)</main>',
+        r'<div[^>]*class="[^"]*(?:entry|post|content|article)-(?:content|body)[^"]*"[^>]*>(.*?)</div>',
+        r'<div[^>]*class="[^"]*post-content[^"]*"[^>]*>(.*?)</div>',
+        r'<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>(.*?)</div>',
+    ]:
+        m = re.search(tag, html, re.DOTALL | re.I)
+        if m:
+            return m.group(1)
+    # Fallback: remove known footer/nav patterns then return all
+    html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.I)
+    html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.I)
+    html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.I)
+    return html
+
+
 def find_section(text, *heading_patterns):
-    """Return up to 600 chars after the first matching heading."""
+    """Return text after the first matching heading, up to the next heading or 800 chars."""
     for pat in heading_patterns:
         m = re.search(pat, text, re.I)
         if m:
-            return text[m.end():m.end() + 600]
+            start = m.end()
+            chunk = text[start:start + 800]
+            # Stop at next major heading
+            next_heading = re.search(
+                r'\n(?:Requirements?|Qualification|Experience|How to Apply|'
+                r'Application|Benefits?|Responsibilities|Duties|About)\s*[:\-\n]',
+                chunk, re.I
+            )
+            if next_heading:
+                chunk = chunk[:next_heading.start()]
+            return chunk
     return ""
 
 
 def extract_bullets(section_text, max_items=6):
-    """Extract clean bullet/list items from a section of text."""
+    """
+    Extract clean bullet/list items from a requirements section.
+    Stops when it hits footer/navigation content.
+    """
     items = []
     for line in section_text.split('\n'):
-        line = line.strip().lstrip('•·-–*▪➤✔✓ ')
+        line = line.strip()
+        # Strip bullet markers
+        line = re.sub(r'^[•·\-–*▪➤✔✓]\s*', '', line)
         line = re.sub(r'^\d+[\.\)]\s*', '', line)
-        if len(line) > 5 and len(line) < 150:
-            items.append(line)
+        line = line.strip()
+
+        # Skip short lines, empty lines, or junk
+        if len(line) < 5 or len(line) > 200:
+            continue
+        if is_junk(line):
+            break  # Stop extraction once we hit footer content
+        if re.search(r'(copyright|©|\bpowered\b|\bprivacy\b)', line, re.I):
+            break
+
+        items.append(line)
         if len(items) >= max_items:
             break
     return items
 
 
+# ─────────────────────────────────────────────
+# ARTICLE DETAIL EXTRACTOR
+# ─────────────────────────────────────────────
+
 def extract_article_details(url):
     """
     Visit the article page and extract real job details.
-    Multi-strategy: labeled fields → requirements section → keyword scan.
+    Qualification is only pulled from the requirements section,
+    never from the page footer.
     """
     details = {}
     try:
@@ -161,7 +243,9 @@ def extract_article_details(url):
             print(f"   ⚠️  HTTP {r.status_code} fetching article")
             return details
 
-        plain = strip_html(r.text)
+        # Isolate main content first to avoid footer pollution
+        main_html = get_main_content(r.text)
+        plain = strip_html(main_html)
 
         # ── CLOSING DATE ─────────────────────────────────────────
         for pat in [
@@ -195,13 +279,14 @@ def extract_article_details(url):
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip().rstrip('.,;')
-                if (3 <= len(val) <= 60
+                if (3 <= len(val) <= 80
                         and not re.search(r'http|www|\.co|click|apply|salary|stipend', val, re.I)
-                        and not re.search(r'[{}\[\]<>@#=;]', val)):
+                        and not re.search(r'[{}\[\]<>@#=;]', val)
+                        and not is_junk(val)):
                     details["location"] = val
                     break
 
-        # ── REQUIREMENTS SECTION ─────────────────────────────────
+        # ── FIND REQUIREMENTS SECTION ────────────────────────────
         req_section = find_section(
             plain,
             r'[Rr]equirements?\s*[:\-]',
@@ -209,30 +294,56 @@ def extract_article_details(url):
             r'[Ee]ligibility\s+[Cc]riteria\s*[:\-]',
             r'[Ww]ho\s+[Cc]an\s+[Aa]pply\s*[:\-]?',
             r'[Qq]ualifications?\s+[Rr]equired\s*[:\-]',
+            r'[Tt]o\s+[Qq]ualify\s*[:\-]?',
         )
-        if req_section:
-            bullets = extract_bullets(req_section, max_items=5)
-            if bullets:
-                details["requirements"] = bullets
 
-        # ── QUALIFICATION ─────────────────────────────────────────
+        # ── QUALIFICATION — only from requirements section ────────
+        # Search qualification INSIDE the requirements section first
+        qual_search_text = req_section if req_section else plain[:2000]
         for pat in [
             r'[Qq]ualification\s*[:\-]\s*([^\n\r]{5,100})',
             r'[Ee]ducation(?:al\s+[Rr]equirement)?\s*[:\-]\s*([^\n\r]{5,80})',
-            r'((?:Grade\s+12|Matric)[^\n\r]{0,80})',
-            r'((?:National\s+(?:Senior|Certificate)|NSC)[^\n\r]{0,80})',
-            r'((?:Diploma|Certificate|Degree|NQF)[^\n\r]{0,80})',
+            r'(Grade\s+12[^\n\r]{0,80})',
+            r'(Matric[^\n\r]{0,60})',
+            r'(National\s+(?:Senior\s+)?Certificate[^\n\r]{0,60})',
+            r'((?:National\s+)?Diploma[^\n\r]{0,60})',
+            r'((?:Bachelor[^\n\r]{0,60}))',
+            r'(NQF\s+Level\s+\d[^\n\r]{0,60})',
         ]:
-            m = re.search(pat, plain, re.I)
+            m = re.search(pat, qual_search_text, re.I)
             if m:
-                val = m.group(1).strip()[:100]
-                if (len(val) >= 5
+                val = m.group(1).strip()
+                # Truncate at sentence end or pipe
+                val = re.split(r'[|]', val)[0].strip()
+                # Cut at first junk phrase
+                for jp in JUNK_PHRASES:
+                    idx = val.lower().find(jp)
+                    if idx > 0:
+                        val = val[:idx].strip()
+                val = val[:100]
+                if (len(val) >= 4
                         and not re.search(r'[{}\[\]<>@#=;]', val)
+                        and not is_junk(val)
                         and any(x in val.lower() for x in
-                                ['grade','matric','diploma','certificate',
-                                 'degree','nqf','qualification','senior'])):
+                                ['grade', 'matric', 'diploma', 'certificate',
+                                 'degree', 'nqf', 'qualification', 'senior', 'bachelor'])):
                     details["qualification"] = val
                     break
+
+        # ── REQUIREMENTS BULLETS ─────────────────────────────────
+        if req_section:
+            bullets = extract_bullets(req_section, max_items=5)
+            # Filter out bullets that duplicate the qualification or contain junk
+            clean_bullets = []
+            qual_lower = details.get("qualification", "").lower()
+            for b in bullets:
+                if is_junk(b):
+                    continue
+                if qual_lower and b.lower() in qual_lower:
+                    continue
+                clean_bullets.append(b)
+            if clean_bullets:
+                details["requirements"] = clean_bullets
 
         # ── EXPERIENCE ───────────────────────────────────────────
         for pat in [
@@ -240,14 +351,17 @@ def extract_article_details(url):
             r'[Ww]ork\s+[Ee]xperience\s*[:\-]\s*([^\n\r]{3,80})',
             r'[Ee]xperience\s*[:\-]\s*([^\n\r]{3,80})',
             r'(No\s+(?:work\s+)?[Ee]xperience\s+(?:required|needed|necessary))',
-            r'(Entry[\s\-][Ll]evel\s*[-–]\s*[Nn]o\s+[Ee]xperience)',
-            r'(\d+\s*(?:year[s]?|yr[s]?)\s+(?:work\s+)?[Ee]xperience)',
+            r'(Entry[\s\-][Ll]evel)',
+            r'(\d+\s*(?:year[s]?|yr[s]?)\s+(?:\w+\s+)?[Ee]xperience)',
             r'(\d+\s*[-–]\s*\d+\s*(?:year[s]?|yr[s]?)\s+[Ee]xperience)',
+            r'([Mm]inimum\s+\d+\s+year[s]?\s+[^\n\r]{3,60})',
         ]:
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip()[:80]
-                if len(val) >= 3 and not re.search(r'[{}\[\]<>@#=;]', val):
+                if (len(val) >= 3
+                        and not re.search(r'[{}\[\]<>@#=;]', val)
+                        and not is_junk(val)):
                     details["experience"] = val
                     break
 
@@ -255,7 +369,7 @@ def extract_article_details(url):
         for pat in [
             r'[Aa]ge\s*[:\-]\s*(\d{2}\s*[-–to]+\s*\d{2}\s*years?)',
             r'[Aa]ged?\s+(\d{2}\s*[-–to]+\s*\d{2}\s*years?)',
-            r'[Bb]etween\s+(\d{2}\s+and\s+\d{2}\s*years?)',
+            r'[Bb]etween\s+(?:the\s+ages?\s+of\s+)?(\d{2}\s+and\s+\d{2}\s*years?)',
             r'(\d{2}\s*[-–]\s*\d{2}\s*years?\s*old)',
             r'(\d{2}\s*[-–]\s*\d{2}\s*years?)',
         ]:
@@ -275,6 +389,7 @@ def extract_article_details(url):
             r'(\d+)\s+[Pp]osts?\s+[Aa]vailable',
             r'(\d+)\s+[Vv]acancies',
             r'[Xx]\s*(\d+)\s+[Pp]osts?',
+            r'X(\d+)\s+',
         ]:
             m = re.search(pat, plain, re.I)
             if m:
@@ -287,7 +402,7 @@ def extract_article_details(url):
         for pat in [
             r'[Ss]tipend\s*[:\-]\s*(R\s*[\d\s,]+(?:\s*per\s+month)?)',
             r'[Ss]alary\s*[:\-]\s*(R\s*[\d\s,]+(?:\s*per\s+(?:month|annum))?)',
-            r'(R\s*\d[\d\s,]*\s*p(?:er)?\s*m(?:onth)?)',
+            r'(R\s*\d[\d\s,]*\s*(?:per\s+month|p\.?m\.?))',
         ]:
             m = re.search(pat, plain, re.I)
             if m:
@@ -337,7 +452,6 @@ def build_post(title, details, direct_url, source):
         lines.append(f"💰 Stipend: {details['stipend']}")
 
     lines.append("")
-
     lines.append(f"📍 Location: {details.get('location', 'See full advert')}")
     lines.append(f"📅 Closing Date: {details.get('closing_date', 'See full advert')}")
     lines.append(f"🌐 Source: {source}")
@@ -412,11 +526,17 @@ def make_key(title):
     return re.sub(r'\s+', ' ', title[:60].lower().strip())
 
 
-def is_relevant(title, summary=""):
+def is_real_job(title, summary=""):
+    """
+    Two-stage filter:
+    1. Must contain a job/opportunity keyword
+    2. Must NOT contain entertainment/gossip/bad keywords
+    """
     text = (title + " " + summary).lower()
     has_job = any(k in text for k in GOOD_KEYWORDS)
     has_act = any(k in text for k in [
-        "apply", "application", "opportunity", "hiring", "available", "2026", "invited"
+        "apply", "application", "opportunity", "hiring",
+        "available", "2026", "invited", "register", "programme",
     ])
     has_bad = any(k in text for k in BAD_KEYWORDS)
     return has_job and has_act and not has_bad
@@ -500,7 +620,7 @@ def scrape_edupstairs():
             m = re.search(pat, r.text)
             title = (m.group(1).strip() if m
                      else link.split("/")[-1].replace("-", " ").title())
-            if is_relevant(title, ""):
+            if is_real_job(title, ""):
                 listings.append({"title": title[:120], "link": link, "source": "Edupstairs"})
                 print(f"    Edupstairs ✔ {title[:65]}")
         print(f"  Edupstairs: {len(listings)} relevant listings")
@@ -537,7 +657,7 @@ def fetch_all_listings():
                 link = get_item_link(item)
                 if not link:
                     continue
-                if is_relevant(title, summary):
+                if is_real_job(title, summary):
                     all_listings.append({
                         "title": title[:120],
                         "link": link,
@@ -568,7 +688,7 @@ def fetch_all_listings():
 # ─────────────────────────────────────────────
 
 def main():
-    print(f"\n🤖 Kuvukiland Job Bot v5 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kuvukiland Job Bot v6 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml available\n" if LXML_AVAILABLE else "⚠️  lxml not available\n")
 
     already_posted = load_posted()
@@ -591,13 +711,13 @@ def main():
             break
 
         key = make_key(listing["title"])
-        print(f"\n📤 [{posted_count + 1}/{MAX_PER_RUN}] Processing: {listing['title'][:65]}")
+        print(f"\n📤 [{posted_count + 1}/{MAX_PER_RUN}] {listing['title'][:65]}")
         print(f"   URL: {listing['link'][:80]}")
         print("   Extracting details...")
 
         details = extract_article_details(listing["link"])
 
-        # Skip if expired
+        # Skip expired
         closing_obj = details.get("closing_date_obj")
         if closing_obj and closing_obj < datetime.now():
             print(f"   ❌ EXPIRED ({details.get('closing_date')}) — skipping")
@@ -620,7 +740,6 @@ def main():
             save_posted(key)
             posted_count += 1
             print(f"✅ Posted {posted_count}/{MAX_PER_RUN}")
-            # Small delay between posts to avoid Facebook rate limits
             if posted_count < MAX_PER_RUN:
                 time.sleep(5)
 
