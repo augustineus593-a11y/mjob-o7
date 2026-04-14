@@ -3,7 +3,9 @@ Kuvukiland Job Bot v6
 - Requirements extracted exactly as written in the advertisement
 - Qualification match anchored to requirements section only (no footer junk)
 - Gossip/entertainment articles blocked
-- 2026 year enforcement — stale 2024/2025 listings never posted
+- 2026 year enforcement via confirm_current_year() at article-visit stage
+- "2024"/"2025" removed from BAD_KEYWORDS — year filtering now happens AFTER
+  visiting the article, not at RSS title stage (fixes Learnerships24 drought)
 - Posts up to 6 per run, runs every 10 minutes via GitHub Actions
 """
 
@@ -44,6 +46,11 @@ GOOD_KEYWORDS = [
     "yes programme", "nyda", "seta", "nqf",
 ]
 
+# NOTE: "2024" and "2025" intentionally NOT in this list.
+# Stale-year filtering is handled by confirm_current_year() inside
+# extract_article_details() — after the article is fetched.
+# Putting those years here was pre-filtering Learnerships24 at RSS stage
+# and causing a content drought.
 BAD_KEYWORDS = [
     "honours", "masters", "phd", "postgraduate",
     "5 years experience", "10 years", "executive", "head of", "director",
@@ -53,8 +60,7 @@ BAD_KEYWORDS = [
     "looting", "crime", "convicted", "tender", "parliament",
     "survey", "guide to", "what is", "celebrating",
     "top 10", "list of", "here are", "everything you need",
-    "2024", "2025",   # ← block any listing still referencing old years
-    # Entertainment / gossip
+    # Entertainment / gossip / non-job content
     "pens heartfelt", "last episode", "airs last", "smoke and mirrors",
     "celebrity", "actress", "actor", "musician", "singer", "rapper",
     "album", "movie", "telenovela", "soap opera", "reality show",
@@ -133,11 +139,8 @@ def is_junk(val):
 def confirm_current_year(title, article_plain_text):
     """
     Returns True if the listing is confirmed to be for the current year (2026).
-    Checks:
-    1. Title contains "2026"
-    2. Article body contains "2026" at least once
-    3. Article URL contains "2026"
-    If none of these, the listing is rejected as potentially stale/old.
+    Checks title first, then the first 5000 chars of article body.
+    Rejects listings with no current-year reference as potentially stale.
     """
     if CURRENT_YEAR in title:
         return True
@@ -226,7 +229,7 @@ def extract_bullets(section_text, max_items=5):
 def extract_article_details(url, title=""):
     """
     Visit the article and extract real details.
-    Also verifies the listing is for 2026 — returns None if stale.
+    Returns None if the listing cannot be confirmed as current-year (stale).
     """
     details = {}
     try:
@@ -293,7 +296,7 @@ def extract_article_details(url, title=""):
             r'[Tt]o\s+[Qq]ualify\s*[:\-]?',
         )
 
-        # ── QUALIFICATION ─────────────────────────────────────────
+        # ── QUALIFICATION — only from requirements section ────────
         qual_search_text = req_section if req_section else plain[:2000]
         for pat in [
             r'[Qq]ualification\s*[:\-]\s*([^\n\r]{5,100})',
@@ -702,15 +705,15 @@ def main():
         print(f"   URL: {listing['link'][:80]}")
         print("   Extracting details...")
 
-        # Pass title so year check can use it
+        # Pass title so confirm_current_year() can check it
         details = extract_article_details(listing["link"], title=listing["title"])
 
-        # None means stale listing — mark as posted to never retry it
+        # None means stale listing — mark as posted so we never retry it
         if details is None:
             save_posted(key)
             continue
 
-        # Skip if closing date is expired
+        # Skip if closing date is already expired
         closing_obj = details.get("closing_date_obj")
         if closing_obj and closing_obj < datetime.now():
             print(f"   ❌ EXPIRED ({details.get('closing_date')}) — skipping")
