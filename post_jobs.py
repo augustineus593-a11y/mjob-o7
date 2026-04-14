@@ -5,6 +5,7 @@ Kuvukiland Job Bot v5
 - Handles varied page structures across different SA job sites
 - Falls back cleanly when fields can't be found
 - Direct article URLs only, no bare domains posted
+- Runs every 10 minutes via GitHub Actions cron: '*/10 * * * *'
 """
 
 import os, re, time, requests, random
@@ -56,13 +57,13 @@ BAD_KEYWORDS = [
 ]
 
 RSS_SOURCES = [
-    {"url": "https://www.salearnership.co.za/feed/",   "source": "SA Learnership"},
-    {"url": "https://learnerships24.co.za/feed/",      "source": "Learnerships24"},
-    {"url": "https://youthvillage.co.za/feed/",        "source": "Youth Village SA"},
-    {"url": "https://learnerships.net/feed/",          "source": "Learnerships.net"},
-    {"url": "https://southafricain.com/feed/",         "source": "South Africa In"},
+    {"url": "https://www.salearnership.co.za/feed/",     "source": "SA Learnership"},
+    {"url": "https://learnerships24.co.za/feed/",        "source": "Learnerships24"},
+    {"url": "https://youthvillage.co.za/feed/",          "source": "Youth Village SA"},
+    {"url": "https://learnerships.net/feed/",            "source": "Learnerships.net"},
+    {"url": "https://southafricain.com/feed/",           "source": "South Africa In"},
     {"url": "https://www.salearnershipjobs.co.za/feed/", "source": "SA Learnership Jobs"},
-    {"url": "https://zaboutjobs.com/feed/",            "source": "ZA Jobs"},
+    {"url": "https://zaboutjobs.com/feed/",              "source": "ZA Jobs"},
 ]
 
 MONTH_MAP = {
@@ -110,12 +111,9 @@ def is_expired(date_str):
 
 # ─────────────────────────────────────────────
 # ARTICLE DETAIL EXTRACTOR
-# Multi-strategy: tries labeled fields, then
-# reads bullet/list content directly from page
 # ─────────────────────────────────────────────
 
 def strip_html(html):
-    """Remove all HTML tags and decode entities, return plain text."""
     html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html, flags=re.DOTALL | re.I)
     html = re.sub(r'<br\s*/?>', '\n', html, flags=re.I)
     html = re.sub(r'<li[^>]*>', '\n• ', html, flags=re.I)
@@ -127,10 +125,6 @@ def strip_html(html):
 
 
 def find_section(text, *heading_patterns):
-    """
-    Find a section of text that follows a heading.
-    Returns up to 600 chars after the heading match.
-    """
     for pat in heading_patterns:
         m = re.search(pat, text, re.I)
         if m:
@@ -141,7 +135,6 @@ def find_section(text, *heading_patterns):
 
 
 def extract_bullets(section_text, max_items=6):
-    """Extract bullet/list items from a section of text."""
     items = []
     for line in section_text.split('\n'):
         line = line.strip().lstrip('•·-–*▪➤✔✓ ')
@@ -154,13 +147,6 @@ def extract_bullets(section_text, max_items=6):
 
 
 def extract_article_details(url):
-    """
-    Visit the article page and extract real job details.
-    Uses a multi-strategy approach:
-    1. Look for labeled fields (Location:, Closing Date:, etc.)
-    2. Find requirement sections and extract bullet points
-    3. Detect experience/qualification keywords in context
-    """
     details = {}
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -206,7 +192,6 @@ def extract_article_details(url):
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip().rstrip('.,;')
-                # Must look like a place name, not code or a URL
                 if (len(val) >= 3 and len(val) <= 60
                         and not re.search(r'http|www|\.co|click|apply|salary|stipend', val, re.I)
                         and not re.search(r'[{}\[\]<>@#=;]', val)):
@@ -222,13 +207,12 @@ def extract_article_details(url):
             r'[Ww]ho\s+[Cc]an\s+[Aa]pply\s*[:\-]?',
             r'[Qq]ualifications?\s+[Rr]equired\s*[:\-]',
         )
-
         if req_section:
             req_bullets = extract_bullets(req_section, max_items=6)
             if req_bullets:
                 details["requirements"] = req_bullets
 
-        # ── QUALIFICATION (within requirements or standalone) ─────
+        # ── QUALIFICATION ─────────────────────────────────────────
         qual_patterns = [
             r'[Qq]ualification\s*[:\-]\s*([^\n\r]{5,100})',
             r'[Ee]ducation(?:al\s+[Rr]equirement)?\s*[:\-]\s*([^\n\r]{5,80})',
@@ -262,8 +246,7 @@ def extract_article_details(url):
             m = re.search(pat, plain, re.I)
             if m:
                 val = m.group(1).strip()[:80]
-                if (len(val) >= 3
-                        and not re.search(r'[{}\[\]<>@#=;]', val)):
+                if len(val) >= 3 and not re.search(r'[{}\[\]<>@#=;]', val):
                     details["experience"] = val
                     break
 
@@ -329,48 +312,37 @@ def build_post(title, details, direct_url, source):
     title = SITE_SUFFIXES.sub('', title).strip()
     lines = ["🔌 Nasi iSpan 🚨", "", f"💼 {title}", ""]
 
-    # Positions if found
     if details.get("positions"):
         lines.append(f"📌 Posts Available: {details['positions']}")
         lines.append("")
 
-    # Requirements section
     lines.append("📋 Requirements:")
 
-    # Qualification
     qual = details.get("qualification", "Grade 12 / Matric")
     lines.append(f"✔ Qualification: {qual}")
 
-    # Experience — show what was actually found, never assume "not required"
     exp = details.get("experience")
     if exp:
         lines.append(f"✔ Experience: {exp}")
-    # If we found requirements bullets and no labeled experience, show them
     elif details.get("requirements"):
         for req in details["requirements"][:4]:
             lines.append(f"✔ {req}")
-    # Only say "not required" if the page literally said so OR it's a known entry-level keyword
-    # Otherwise leave it out entirely
     else:
         lines.append("✔ See full advert for requirements")
 
-    # Age only if found
     if details.get("age"):
         lines.append(f"✔ Age: {details['age']}")
 
-    # Stipend if found
     if details.get("stipend"):
         lines.append(f"💰 Stipend: {details['stipend']}")
 
     lines.append("")
 
-    # Location
     if details.get("location"):
         lines.append(f"📍 Location: {details['location']}")
     else:
         lines.append("📍 Location: See full advert")
 
-    # Closing date
     if details.get("closing_date"):
         lines.append(f"📅 Closing Date: {details['closing_date']}")
     else:
@@ -409,7 +381,6 @@ def clean_xml(text):
 
 
 def parse_feed(raw_bytes):
-    # Strategy 1: ET with cleaned text
     try:
         text = clean_xml(raw_bytes.decode("utf-8", errors="replace"))
         root = ET.fromstring(text.encode("utf-8"))
@@ -418,7 +389,6 @@ def parse_feed(raw_bytes):
             return items
     except ET.ParseError:
         pass
-    # Strategy 2: lxml with recover=True
     if LXML_AVAILABLE:
         try:
             parser = lxml_etree.XMLParser(recover=True, encoding="utf-8")
@@ -631,7 +601,6 @@ def main():
 
         details = extract_article_details(listing["link"])
 
-        # Skip if closing date found and already expired
         closing_obj = details.get("closing_date_obj")
         if closing_obj and closing_obj < datetime.now():
             print(f"   ❌ EXPIRED ({details.get('closing_date')}) — skipping")
