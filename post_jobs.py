@@ -3,6 +3,7 @@ Kuvukiland Job Bot v6
 - Requirements extracted exactly as written in the advertisement
 - Qualification match anchored to requirements section only (no footer junk)
 - Gossip/entertainment articles blocked
+- 2026 year enforcement — stale 2024/2025 listings never posted
 - Posts up to 6 per run, runs every 10 minutes via GitHub Actions
 """
 
@@ -51,8 +52,9 @@ BAD_KEYWORDS = [
     "court", "murder", "killed", "died", "protest", "strike",
     "looting", "crime", "convicted", "tender", "parliament",
     "survey", "guide to", "what is", "celebrating",
-    "top 10", "list of", "here are", "everything you need", "2024",
-    # Entertainment / gossip / non-job content
+    "top 10", "list of", "here are", "everything you need",
+    "2024", "2025",   # ← block any listing still referencing old years
+    # Entertainment / gossip
     "pens heartfelt", "last episode", "airs last", "smoke and mirrors",
     "celebrity", "actress", "actor", "musician", "singer", "rapper",
     "album", "movie", "telenovela", "soap opera", "reality show",
@@ -86,13 +88,14 @@ SITE_SUFFIXES = re.compile(
 
 MAX_PER_RUN = 6
 
-# Footer/nav junk that should never appear in extracted values
 JUNK_PHRASES = [
     'copyright', 'powered by', 'privacy policy', 'all rights reserved',
     'cookie', 'subscribe', 'newsletter', 'follow us', 'share this',
     'click here', 'read more', 'learn more', 'mcnitols', 'edupstairs',
     'youth village', 'salearnership', 'learnerships24',
 ]
+
+CURRENT_YEAR = str(datetime.now().year)   # "2026"
 
 
 # ─────────────────────────────────────────────
@@ -118,15 +121,29 @@ def parse_date_str(s):
     return None
 
 
-def is_expired(date_str):
-    parsed = parse_date_str(date_str)
-    return parsed < datetime.now() if parsed else False
-
-
 def is_junk(val):
-    """Return True if the value contains footer/nav garbage."""
     v = val.lower()
     return any(j in v for j in JUNK_PHRASES)
+
+
+# ─────────────────────────────────────────────
+# YEAR VALIDATION
+# ─────────────────────────────────────────────
+
+def confirm_current_year(title, article_plain_text):
+    """
+    Returns True if the listing is confirmed to be for the current year (2026).
+    Checks:
+    1. Title contains "2026"
+    2. Article body contains "2026" at least once
+    3. Article URL contains "2026"
+    If none of these, the listing is rejected as potentially stale/old.
+    """
+    if CURRENT_YEAR in title:
+        return True
+    if CURRENT_YEAR in article_plain_text[:5000]:
+        return True
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -134,22 +151,15 @@ def is_junk(val):
 # ─────────────────────────────────────────────
 
 def strip_html(html):
-    """Convert HTML to clean plain text, preserving list structure with newlines."""
-    # Remove script/style blocks entirely
     html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html,
                   flags=re.DOTALL | re.I)
-    # Convert block elements to newlines so sections stay separated
     html = re.sub(r'<(br|p|div|h[1-6]|section|article|header|footer|nav)[^>]*>',
                   '\n', html, flags=re.I)
     html = re.sub(r'</(p|div|h[1-6]|section|article|header|footer|nav)>',
                   '\n', html, flags=re.I)
-    # Convert list items to bullet lines
     html = re.sub(r'<li[^>]*>', '\n• ', html, flags=re.I)
-    # Strip all remaining tags
     html = re.sub(r'<[^>]+>', '', html)
-    # Decode HTML entities
     html = unescape(html)
-    # Clean up whitespace
     html = re.sub(r'[ \t]+', ' ', html)
     html = re.sub(r'\n[ \t]+', '\n', html)
     html = re.sub(r'\n{3,}', '\n\n', html)
@@ -157,12 +167,6 @@ def strip_html(html):
 
 
 def get_main_content(html):
-    """
-    Extract only the main article content, stripping header/footer/nav/sidebar.
-    This prevents footer text like 'Copyright © 2026. Created by Edupstairs'
-    from polluting extracted fields.
-    """
-    # Try to isolate the article body
     for tag in [
         r'<article[^>]*>(.*?)</article>',
         r'<main[^>]*>(.*?)</main>',
@@ -173,7 +177,6 @@ def get_main_content(html):
         m = re.search(tag, html, re.DOTALL | re.I)
         if m:
             return m.group(1)
-    # Fallback: remove known footer/nav patterns then return all
     html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.I)
     html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.I)
     html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.I)
@@ -181,13 +184,11 @@ def get_main_content(html):
 
 
 def find_section(text, *heading_patterns):
-    """Return text after the first matching heading, up to the next heading or 800 chars."""
     for pat in heading_patterns:
         m = re.search(pat, text, re.I)
         if m:
             start = m.end()
             chunk = text[start:start + 800]
-            # Stop at next major heading
             next_heading = re.search(
                 r'\n(?:Requirements?|Qualification|Experience|How to Apply|'
                 r'Application|Benefits?|Responsibilities|Duties|About)\s*[:\-\n]',
@@ -199,27 +200,19 @@ def find_section(text, *heading_patterns):
     return ""
 
 
-def extract_bullets(section_text, max_items=6):
-    """
-    Extract clean bullet/list items from a requirements section.
-    Stops when it hits footer/navigation content.
-    """
+def extract_bullets(section_text, max_items=5):
     items = []
     for line in section_text.split('\n'):
         line = line.strip()
-        # Strip bullet markers
         line = re.sub(r'^[•·\-–*▪➤✔✓]\s*', '', line)
         line = re.sub(r'^\d+[\.\)]\s*', '', line)
         line = line.strip()
-
-        # Skip short lines, empty lines, or junk
         if len(line) < 5 or len(line) > 200:
             continue
         if is_junk(line):
-            break  # Stop extraction once we hit footer content
+            break
         if re.search(r'(copyright|©|\bpowered\b|\bprivacy\b)', line, re.I):
             break
-
         items.append(line)
         if len(items) >= max_items:
             break
@@ -230,22 +223,25 @@ def extract_bullets(section_text, max_items=6):
 # ARTICLE DETAIL EXTRACTOR
 # ─────────────────────────────────────────────
 
-def extract_article_details(url):
+def extract_article_details(url, title=""):
     """
-    Visit the article page and extract real job details.
-    Qualification is only pulled from the requirements section,
-    never from the page footer.
+    Visit the article and extract real details.
+    Also verifies the listing is for 2026 — returns None if stale.
     """
     details = {}
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
             print(f"   ⚠️  HTTP {r.status_code} fetching article")
-            return details
+            return None
 
-        # Isolate main content first to avoid footer pollution
         main_html = get_main_content(r.text)
         plain = strip_html(main_html)
+
+        # ── YEAR CHECK — reject stale listings ───────────────────
+        if not confirm_current_year(title, plain):
+            print(f"   ❌ No '{CURRENT_YEAR}' found in title or article — skipping stale listing")
+            return None
 
         # ── CLOSING DATE ─────────────────────────────────────────
         for pat in [
@@ -286,7 +282,7 @@ def extract_article_details(url):
                     details["location"] = val
                     break
 
-        # ── FIND REQUIREMENTS SECTION ────────────────────────────
+        # ── REQUIREMENTS SECTION ─────────────────────────────────
         req_section = find_section(
             plain,
             r'[Rr]equirements?\s*[:\-]',
@@ -297,8 +293,7 @@ def extract_article_details(url):
             r'[Tt]o\s+[Qq]ualify\s*[:\-]?',
         )
 
-        # ── QUALIFICATION — only from requirements section ────────
-        # Search qualification INSIDE the requirements section first
+        # ── QUALIFICATION ─────────────────────────────────────────
         qual_search_text = req_section if req_section else plain[:2000]
         for pat in [
             r'[Qq]ualification\s*[:\-]\s*([^\n\r]{5,100})',
@@ -313,9 +308,7 @@ def extract_article_details(url):
             m = re.search(pat, qual_search_text, re.I)
             if m:
                 val = m.group(1).strip()
-                # Truncate at sentence end or pipe
                 val = re.split(r'[|]', val)[0].strip()
-                # Cut at first junk phrase
                 for jp in JUNK_PHRASES:
                     idx = val.lower().find(jp)
                     if idx > 0:
@@ -333,7 +326,6 @@ def extract_article_details(url):
         # ── REQUIREMENTS BULLETS ─────────────────────────────────
         if req_section:
             bullets = extract_bullets(req_section, max_items=5)
-            # Filter out bullets that duplicate the qualification or contain junk
             clean_bullets = []
             qual_lower = details.get("qualification", "").lower()
             for b in bullets:
@@ -527,11 +519,6 @@ def make_key(title):
 
 
 def is_real_job(title, summary=""):
-    """
-    Two-stage filter:
-    1. Must contain a job/opportunity keyword
-    2. Must NOT contain entertainment/gossip/bad keywords
-    """
     text = (title + " " + summary).lower()
     has_job = any(k in text for k in GOOD_KEYWORDS)
     has_act = any(k in text for k in [
@@ -715,9 +702,15 @@ def main():
         print(f"   URL: {listing['link'][:80]}")
         print("   Extracting details...")
 
-        details = extract_article_details(listing["link"])
+        # Pass title so year check can use it
+        details = extract_article_details(listing["link"], title=listing["title"])
 
-        # Skip expired
+        # None means stale listing — mark as posted to never retry it
+        if details is None:
+            save_posted(key)
+            continue
+
+        # Skip if closing date is expired
         closing_obj = details.get("closing_date_obj")
         if closing_obj and closing_obj < datetime.now():
             print(f"   ❌ EXPIRED ({details.get('closing_date')}) — skipping")
