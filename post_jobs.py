@@ -1,5 +1,5 @@
 """
-Kuvukiland Job Bot v6
+Kuvukiland Job Bot v7
 - Requirements extracted exactly as written in the advertisement
 - Qualification match anchored to requirements section only (no footer junk)
 - Gossip/entertainment articles blocked
@@ -7,6 +7,9 @@ Kuvukiland Job Bot v6
 - "2024"/"2025" removed from BAD_KEYWORDS — year filtering now happens AFTER
   visiting the article, not at RSS title stage (fixes Learnerships24 drought)
 - Posts up to 6 per run, runs every 10 minutes via GitHub Actions
+- v7: No fake defaults — qualification/requirements say "See full advert"
+  if nothing concrete is found. Qualification regex tightened to capture
+  the full phrase, not a lone word like "diploma" or "matric".
 """
 
 import os, re, time, requests, random
@@ -46,11 +49,6 @@ GOOD_KEYWORDS = [
     "yes programme", "nyda", "seta", "nqf",
 ]
 
-# NOTE: "2024" and "2025" intentionally NOT in this list.
-# Stale-year filtering is handled by confirm_current_year() inside
-# extract_article_details() — after the article is fetched.
-# Putting those years here was pre-filtering Learnerships24 at RSS stage
-# and causing a content drought.
 BAD_KEYWORDS = [
     "honours", "masters", "phd", "postgraduate",
     "5 years experience", "10 years", "executive", "head of", "director",
@@ -60,7 +58,6 @@ BAD_KEYWORDS = [
     "looting", "crime", "convicted", "tender", "parliament",
     "survey", "guide to", "what is", "celebrating",
     "top 10", "list of", "here are", "everything you need",
-    # Entertainment / gossip / non-job content
     "pens heartfelt", "last episode", "airs last", "smoke and mirrors",
     "celebrity", "actress", "actor", "musician", "singer", "rapper",
     "album", "movie", "telenovela", "soap opera", "reality show",
@@ -139,8 +136,6 @@ def is_junk(val):
 def confirm_current_year(title, article_plain_text):
     """
     Returns True if the listing is confirmed to be for the current year (2026).
-    Checks title first, then the first 5000 chars of article body.
-    Rejects listings with no current-year reference as potentially stale.
     """
     if CURRENT_YEAR in title:
         return True
@@ -223,6 +218,104 @@ def extract_bullets(section_text, max_items=5):
 
 
 # ─────────────────────────────────────────────
+# QUALIFICATION EXTRACTION (v7 — exact, no guessing)
+# ─────────────────────────────────────────────
+
+def extract_qualification(text):
+    """
+    Extract the qualification exactly as stated in the ad.
+    Only returns a value when the full phrase is meaningful and concrete.
+    Returns None if nothing reliable is found — caller must NOT substitute a
+    fake default like "Grade 12 / Matric".
+
+    Strategy:
+    1. Try labelled patterns first (e.g. "Qualification: National Diploma in X")
+    2. Fall back to standalone sentence-level patterns
+    3. Validate: result must be long enough and contain a real qualification noun
+    4. Reject lone single words like "diploma" or "matric" without context
+    """
+
+    QUAL_NOUNS = [
+        'grade 12', 'grade12', 'matric', 'national senior certificate',
+        'national certificate', 'national diploma', 'higher certificate',
+        'advanced diploma', 'bachelor', 'b.tech', 'btech', 'b tech',
+        'degree', 'diploma', 'nqf level', 'nqf', 'abet', 'fet',
+        'trade test', 'artisan', 'certificate',
+    ]
+
+    # ── Step 1: labelled patterns ────────────────────────────────
+    labelled = [
+        r'[Qq]ualification(?:s)?\s*[:\-]\s*([^\n\r]{10,120})',
+        r'[Ee]ducation(?:al\s+[Rr]equirement)?\s*[:\-]\s*([^\n\r]{10,100})',
+        r'[Mm]inimum\s+[Qq]ualification\s*[:\-]\s*([^\n\r]{10,120})',
+        r'[Rr]equired\s+[Qq]ualification\s*[:\-]\s*([^\n\r]{10,120})',
+        r'[Aa]cademic\s+[Qq]ualification\s*[:\-]\s*([^\n\r]{10,120})',
+    ]
+    for pat in labelled:
+        m = re.search(pat, text, re.I)
+        if m:
+            val = _clean_qual(m.group(1))
+            if val and _qual_is_valid(val, QUAL_NOUNS):
+                return val
+
+    # ── Step 2: standalone full-phrase patterns ──────────────────
+    standalone = [
+        # "Grade 12 / National Senior Certificate" style
+        r'(Grade\s+12[^.\n\r]{0,100})',
+        r'(Matric(?:ulation)?(?:\s+Certificate)?[^.\n\r]{0,80})',
+        r'(National\s+Senior\s+Certificate[^.\n\r]{0,80})',
+        # Diploma / Degree lines  — must be ≥ 15 chars to avoid lone "diploma"
+        r'((?:National\s+)?Diploma\s+in\s+[^.\n\r]{5,100})',
+        r'((?:National\s+)?Diploma\s+(?:or|and)\s+[^.\n\r]{5,80})',
+        r'(Higher\s+Certificate\s+in\s+[^.\n\r]{5,80})',
+        r'(Advanced\s+Diploma\s+in\s+[^.\n\r]{5,80})',
+        r'(Bachelor(?:\'s)?\s+(?:Degree\s+)?in\s+[^.\n\r]{5,80})',
+        r'(B\.?Tech\s+in\s+[^.\n\r]{5,80})',
+        r'(NQF\s+Level\s+\d[^.\n\r]{0,60})',
+        r'(Trade\s+Test[^.\n\r]{0,60})',
+        # Bullet-style: "• Diploma in Mechanical Engineering"
+        r'[•·\-–*]\s+((?:Diploma|Degree|Certificate|Matric|Grade\s+12)[^.\n\r]{5,100})',
+    ]
+    for pat in standalone:
+        m = re.search(pat, text, re.I)
+        if m:
+            val = _clean_qual(m.group(1))
+            if val and _qual_is_valid(val, QUAL_NOUNS) and len(val) >= 12:
+                return val
+
+    return None   # Nothing found — do NOT guess
+
+
+def _clean_qual(val):
+    """Trim junk from extracted qualification string."""
+    val = val.strip()
+    # Cut at pipe, semicolon, or obvious junk start
+    val = re.split(r'[|;]', val)[0].strip()
+    # Remove trailing punctuation noise
+    val = val.rstrip('.,;:-()')
+    # Strip junk phrases
+    for jp in JUNK_PHRASES:
+        idx = val.lower().find(jp)
+        if idx > 0:
+            val = val[:idx].strip()
+    # Hard cap
+    val = val[:120]
+    # Remove control chars
+    val = re.sub(r'[{}\[\]<>@#=]', '', val).strip()
+    return val
+
+
+def _qual_is_valid(val, qual_nouns):
+    """Check the value contains a real qualification noun and isn't junk."""
+    if not val or len(val) < 4:
+        return False
+    if is_junk(val):
+        return False
+    vl = val.lower()
+    return any(n in vl for n in qual_nouns)
+
+
+# ─────────────────────────────────────────────
 # ARTICLE DETAIL EXTRACTOR
 # ─────────────────────────────────────────────
 
@@ -296,35 +389,14 @@ def extract_article_details(url, title=""):
             r'[Tt]o\s+[Qq]ualify\s*[:\-]?',
         )
 
-        # ── QUALIFICATION — only from requirements section ────────
-        qual_search_text = req_section if req_section else plain[:2000]
-        for pat in [
-            r'[Qq]ualification\s*[:\-]\s*([^\n\r]{5,100})',
-            r'[Ee]ducation(?:al\s+[Rr]equirement)?\s*[:\-]\s*([^\n\r]{5,80})',
-            r'(Grade\s+12[^\n\r]{0,80})',
-            r'(Matric[^\n\r]{0,60})',
-            r'(National\s+(?:Senior\s+)?Certificate[^\n\r]{0,60})',
-            r'((?:National\s+)?Diploma[^\n\r]{0,60})',
-            r'((?:Bachelor[^\n\r]{0,60}))',
-            r'(NQF\s+Level\s+\d[^\n\r]{0,60})',
-        ]:
-            m = re.search(pat, qual_search_text, re.I)
-            if m:
-                val = m.group(1).strip()
-                val = re.split(r'[|]', val)[0].strip()
-                for jp in JUNK_PHRASES:
-                    idx = val.lower().find(jp)
-                    if idx > 0:
-                        val = val[:idx].strip()
-                val = val[:100]
-                if (len(val) >= 4
-                        and not re.search(r'[{}\[\]<>@#=;]', val)
-                        and not is_junk(val)
-                        and any(x in val.lower() for x in
-                                ['grade', 'matric', 'diploma', 'certificate',
-                                 'degree', 'nqf', 'qualification', 'senior', 'bachelor'])):
-                    details["qualification"] = val
-                    break
+        # ── QUALIFICATION — exact, from requirements section first ─
+        # Try requirements section first, fall back to full article
+        qual = extract_qualification(req_section) if req_section else None
+        if not qual:
+            qual = extract_qualification(plain[:3000])
+        if qual:
+            details["qualification"] = qual
+        # If still nothing → details["qualification"] is simply absent (no fake default)
 
         # ── REQUIREMENTS BULLETS ─────────────────────────────────
         if req_section:
@@ -415,7 +487,7 @@ def extract_article_details(url, title=""):
 
 
 # ─────────────────────────────────────────────
-# POST BUILDER
+# POST BUILDER (v7 — no fake defaults)
 # ─────────────────────────────────────────────
 
 def build_post(title, details, direct_url, source):
@@ -428,17 +500,25 @@ def build_post(title, details, direct_url, source):
 
     lines.append("📋 Requirements:")
 
-    qual = details.get("qualification", "Grade 12 / Matric")
-    lines.append(f"✔ Qualification: {qual}")
+    # ── Qualification: exact from advert, or honest fallback ─────
+    qual = details.get("qualification")
+    if qual:
+        lines.append(f"✔ Qualification: {qual}")
+    else:
+        lines.append("✔ Qualification: See full advert")
 
+    # ── Experience or requirement bullets ────────────────────────
     exp = details.get("experience")
     if exp:
         lines.append(f"✔ Experience: {exp}")
-    elif details.get("requirements"):
-        for req in details["requirements"][:4]:
+
+    reqs = details.get("requirements", [])
+    if reqs:
+        for req in reqs[:4]:
             lines.append(f"✔ {req}")
-    else:
-        lines.append("✔ See full advert for requirements")
+    elif not exp and not qual:
+        # Nothing at all found — direct them to the advert
+        lines.append("✔ See full advert for all requirements")
 
     if details.get("age"):
         lines.append(f"✔ Age: {details['age']}")
@@ -678,7 +758,7 @@ def fetch_all_listings():
 # ─────────────────────────────────────────────
 
 def main():
-    print(f"\n🤖 Kuvukiland Job Bot v6 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kuvukiland Job Bot v7 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml available\n" if LXML_AVAILABLE else "⚠️  lxml not available\n")
 
     already_posted = load_posted()
@@ -705,15 +785,12 @@ def main():
         print(f"   URL: {listing['link'][:80]}")
         print("   Extracting details...")
 
-        # Pass title so confirm_current_year() can check it
         details = extract_article_details(listing["link"], title=listing["title"])
 
-        # None means stale listing — mark as posted so we never retry it
         if details is None:
             save_posted(key)
             continue
 
-        # Skip if closing date is already expired
         closing_obj = details.get("closing_date_obj")
         if closing_obj and closing_obj < datetime.now():
             print(f"   ❌ EXPIRED ({details.get('closing_date')}) — skipping")
