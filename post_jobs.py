@@ -1,24 +1,22 @@
 """
-Kara Job Updates — Job Bot v12
-Fixes from v11:
-- BAD_KEYWORDS expanded: "presenter", "lineup", "billing", "studded", "series",
-  "episode", "season", "contestant", "host", "audition", "casting", "reality",
-  "nominated", "award", "highlight", "preview", "teaser", "recap", "review",
-  "watch", "stream", "airs", "premiere", "finale" added — entertainment articles
-  can no longer slip through
-- extract_company() now rejects titles that start with sentence-fragment verbs
-  or opener phrases ("Preparing", "Check", "Applications", "Looking", "How",
-  "Find", "Get", "Here", "This", "These", "Now", "New", "Top", "Best", "Why",
-  "What", "Where", "When", "All", "Join", "Learn", "Meet", "See", "Register")
-  so we never get "Preparing for a Traffic is hiring!" again
-- extract_bullets() tightened: lines >100 chars are dropped (paragraph prose),
-  lines that look like section headers are dropped, lines containing verbs that
-  signal prose paragraphs are dropped
-- confirm_current_year() now accepts the RSS <pubDate> year as a fallback so
-  real 2026 listings are not wrongly skipped
-- fetch_all_listings() now passes pubDate through to listings dict
-- extract_article_details() accepts pub_year kwarg for year fallback
-- No other behaviour changed
+Kara Job Updates — Job Bot v13
+Fixes from v12:
+
+FIX 1 — Requirements displayed as raw clean text (not parsed bullets)
+  The bullet-parsing approach kept producing garbage (field labels, section
+  headers, prose sentences). Now extract_requirements_block() grabs the
+  requirements section as a raw text block, does minimal cleaning (strip
+  obvious junk lines, deduplicate, cap at 10 lines), and the post displays
+  it verbatim under "Minimum Requirements:" — exactly as the advert has it.
+  extract_bullets() is removed entirely.
+
+FIX 2 — Celebrity/article filter hardened
+  is_real_job() now requires a GOOD_KEYWORD to appear in the TITLE itself
+  (not just the RSS summary). Summary is only used to confirm action words.
+  This stops articles like '"I Am Incredibly Grateful..." Karabelo Ramabodu'
+  from slipping through because "youth" appeared somewhere in the summary.
+  BAD_KEYWORDS are checked against title-only first; one bad keyword in the
+  title kills the listing immediately regardless of summary.
 """
 
 import os, re, time, requests, random
@@ -290,82 +288,87 @@ def find_section(text, *heading_patterns):
 
 
 # ─────────────────────────────────────────────
-# BULLET EXTRACTION  (v12: tightened)
+# REQUIREMENTS BLOCK — raw clean text (v13)
 # ─────────────────────────────────────────────
 
-# Prose-paragraph signal words — if a line starts with these it's not a bullet
-_PROSE_STARTERS = re.compile(
-    r'^(the |this |these |those |a |an |in |during |successful |learners? |'
-    r'applicants? |candidates? |you |your |we |our |it |if |for |please |'
-    r'note |all |any |each |both |such |further |additionally|moreover|however|'
-    r'therefore|participants?|programme|program)',
+# Lines that are pure section-navigation noise (not actual requirements)
+_REQ_JUNK_LINE = re.compile(
+    r'^(view (latest|all|more)|apply (now|here|online)|contact us|'
+    r'for more (info|information|details)|click (here|below)|'
+    r'share this|follow us|subscribe|read more|learn more|'
+    r'what (the|this)|how to apply|about (us|the company)|overview|'
+    r'introduction|note:|nb:|please note)',
     re.I
 )
 
-# Section-header patterns — drop these entirely
-_SECTION_HEADER = re.compile(
-    r'^(what (the|this)|how to|about|overview|description|introduction|'
-    r'benefits?|responsibilities|duties|key (responsibilities|duties|skills)|'
-    r'job (description|summary)|role (overview|summary)|'
-    r'view latest|view (all|more)|apply (now|here|online)|'
-    r'contact us|for more|click (here|below)|'
-    r'to apply|application (process|procedure))',
-    re.I
-)
-
-
-def extract_bullets(section_text, max_items=6):
+def extract_requirements_block(plain_text):
     """
-    Extract short, genuine requirement bullets from a section of text.
-    v12 changes:
-    - Max line length reduced from 200 → 100 chars (drops paragraph prose)
-    - Lines starting with prose-paragraph words are dropped
-    - Lines that look like section headers are dropped
-    - Max items reduced from 8 → 6 to keep posts clean
-    """
-    items = []
-    for line in section_text.split('\n'):
-        line = line.strip()
-        # Strip bullet/number prefixes
-        line = re.sub(r'^[•·\-–*▪➤✔✓]\s*', '', line)
-        line = re.sub(r'^\d+[\.\)]\s*', '', line)
-        line = line.strip()
+    v13: Instead of trying to parse bullets, extract the requirements section
+    as a clean raw text block — exactly as the advert presents it.
 
-        # Length gates  (v12: max 100 chars, not 200)
-        if len(line) < 5 or len(line) > 100:
+    Steps:
+    1. Find the requirements heading in the plain text
+    2. Grab the chunk until the next section heading
+    3. Split into lines, drop obvious junk/navigation lines and blank lines
+    4. Deduplicate adjacent identical lines
+    5. Return max 10 clean lines joined with newlines
+    """
+    # Try to find the requirements section
+    section = find_section(
+        plain_text,
+        r'[Mm]inimum\s+[Rr]equirements?\s*[:\-]',
+        r'[Rr]equirements?\s*[:\-]',
+        r'[Ee]ligibility\s+[Cc]riteria\s*[:\-]',
+        r'[Ww]ho\s+[Cc]an\s+[Aa]pply\s*[:\-]?',
+        r'[Qq]ualifications?\s+[Rr]equired\s*[:\-]',
+        r'[Tt]o\s+[Qq]ualify\s*[:\-]?',
+    )
+    if not section:
+        return ""
+
+    clean_lines = []
+    seen = set()
+
+    for raw_line in section.split('\n'):
+        # Basic cleanup
+        line = raw_line.strip()
+        line = re.sub(r'^[•·▪➤✔✓\-–*]\s*', '', line).strip()   # strip bullet chars
+        line = re.sub(r'^\d+[\.\)]\s*', '', line).strip()         # strip numbering
+
+        # Skip empty or very short lines
+        if len(line) < 4:
             continue
 
-        # Junk phrases
+        # Skip lines that are pure site junk or navigation
         if is_junk(line):
-            break
+            break   # junk usually means we've left the content area
 
-        # Copyright / footer signals → stop parsing
+        if _REQ_JUNK_LINE.match(line):
+            continue
+
+        # Stop if we hit a copyright/footer signal
         if re.search(r'(copyright|©|\bpowered\b|\bprivacy\b)', line, re.I):
             break
 
-        # v12: Drop prose-paragraph lines
-        if _PROSE_STARTERS.match(line):
+        # Skip pure section-label lines with nothing after the colon
+        # e.g. "Educational Requirements" alone, "Experience Requirements" alone
+        if re.match(r'^(Educational|Experience|Academic|Other|Additional|'
+                    r'General|Basic|Further|Key)\s+(Requirements?|Qualifications?'
+                    r'|Criteria|Skills?)\s*:?\s*$', line, re.I):
             continue
 
-        # v12: Drop section-header lines
-        if _SECTION_HEADER.match(line):
+        # Deduplicate
+        line_lower = line.lower()
+        if line_lower in seen:
             continue
+        seen.add(line_lower)
 
-        # v12: Drop lines that are labelled field headers (e.g. "Experience Required: None")
-        # Matches "Experience Required: ..." / "Stipend: ..." / "Industry: ..." etc.
-        if re.match(r'^(Experience\s*\w*|Stipend|Salary|Industry|Duration|NQF|Level|'
-                    r'Type|Category|Sector|Field|Reference|Ref\.?)\s*[:\-]', line, re.I):
-            continue
+        clean_lines.append(line)
 
-        # v12: Drop lines that contain a full sentence (has a verb after subject)
-        if re.search(r'\b(will |can |may |are |were |have |has |was |is |gain |enter |'
-                     r'provide |offer |develop |design |ensure |support |manage )\b', line, re.I):
-            continue
-
-        items.append(line)
-        if len(items) >= max_items:
+        if len(clean_lines) >= 10:
             break
-    return items
+
+    return "\n".join(clean_lines)
 
 
 # ─────────────────────────────────────────────
@@ -501,6 +504,7 @@ def extract_article_details(url, title="", pub_year=None):
                     break
 
         # ── Requirements ─────────────────────────────────────────
+        # Try to extract qualification from a found section first, fallback to full text
         req_section = find_section(
             plain,
             r'[Rr]equirements?\s*[:\-]',
@@ -517,18 +521,10 @@ def extract_article_details(url, title="", pub_year=None):
         if qual:
             details["qualification"] = qual
 
-        if req_section:
-            bullets = extract_bullets(req_section, max_items=6)
-            clean_bullets = []
-            qual_lower = details.get("qualification", "").lower()
-            for b in bullets:
-                if is_junk(b):
-                    continue
-                if qual_lower and b.lower() in qual_lower:
-                    continue
-                clean_bullets.append(b)
-            if clean_bullets:
-                details["requirements"] = clean_bullets
+        # v13: Raw requirements block — displayed as-is in the post
+        req_block = extract_requirements_block(plain)
+        if req_block:
+            details["requirements_block"] = req_block
 
         # ── Experience ───────────────────────────────────────────
         for pat in [
@@ -709,15 +705,15 @@ def build_post(title, details, direct_url, source):
     title = smart_title(title)
     direct_url = strip_utm(direct_url)
 
-    opp_type  = details.get("opp_type", "opportunity")
-    qual      = details.get("qualification", "")
-    exp       = details.get("experience", "")
-    location  = details.get("location", "")
-    closing   = details.get("closing_date", "")
-    stipend   = details.get("stipend", "")
-    age       = details.get("age", "")
-    reqs      = details.get("requirements", [])
-    positions = details.get("positions", "")
+    opp_type      = details.get("opp_type", "opportunity")
+    qual          = details.get("qualification", "")
+    exp           = details.get("experience", "")
+    location      = details.get("location", "")
+    closing       = details.get("closing_date", "")
+    stipend       = details.get("stipend", "")
+    age           = details.get("age", "")
+    req_block     = details.get("requirements_block", "")
+    positions     = details.get("positions", "")
 
     is_entry = False
     if qual or exp:
@@ -755,55 +751,37 @@ def build_post(title, details, direct_url, source):
 
     lines = [opener, "", f"📌 {title}", ""]
 
-    lines.append("Minimum Requirements:")
+    # ── Minimum Requirements — displayed as raw block ─────────────
+    lines.append("📋 Minimum Requirements:")
+    lines.append("")
+    if req_block:
+        lines.append(req_block)
+    else:
+        lines.append("See full advert for requirements")
     lines.append("")
 
-    if qual:
-        lines.append(f"> Must have {qual}")
-    if exp:
-        el = exp.lower()
-        if "entry" in el:
-            lines.append("> Entry-level — no experience needed")
-        elif "no experience" in el or "no work experience" in el:
-            lines.append("> No work experience required")
-        else:
-            lines.append(f"> {exp}")
-
-    for req in reqs:
-        if is_junk(req):
-            continue
-        if qual and req.lower().strip() in qual.lower():
-            continue
-        lines.append(f"> {req}")
-
-    if age:
-        lines.append(f"> Must be between {age}")
-
-    if not qual and not exp and not reqs:
-        lines.append("> See full advert for requirements")
-
-    lines.append("")
-
+    # ── Stipend ───────────────────────────────────────────────────
     if stipend:
         lines.append(f"💰 Stipend / Salary: {stipend}")
         lines.append("")
 
     if positions:
-        lines.append(f"📋 Posts Available: {positions}")
+        lines.append(f"🔢 Posts Available: {positions}")
         lines.append("")
 
+    # ── Location & closing date ───────────────────────────────────
     if location:
-        lines.append(f"📍 Location — {location}")
+        lines.append(f"📍 Location: {location}")
     else:
-        lines.append("📍 Location — See advert")
+        lines.append("📍 Location: See advert")
 
     if closing:
-        lines.append(f"📅 Closing Date — {closing}")
+        lines.append(f"📅 Closing Date: {closing}")
     else:
-        lines.append("📅 Closing Date — See advert")
+        lines.append("📅 Closing Date: See advert")
 
     lines.append("")
-    lines.append("👇 Click the link below to apply:")
+    lines.append("👇 Apply here:")
     lines.append(direct_url)
     lines.append("")
     lines.append("Share this with someone who needs it 🙏 Let's help each other!")
@@ -874,14 +852,22 @@ def make_key(title):
 
 
 def is_real_job(title, summary=""):
-    text = (title + " " + summary).lower()
-    has_job = any(k in text for k in GOOD_KEYWORDS)
-    has_act = any(k in text for k in [
+    title_lower = title.lower()
+    combined = title_lower + " " + summary.lower()
+
+    # One bad keyword in the TITLE → reject immediately
+    if any(k in title_lower for k in BAD_KEYWORDS):
+        return False
+
+    # Good keyword MUST appear in the TITLE — not just buried in the summary
+    if not any(k in title_lower for k in GOOD_KEYWORDS):
+        return False
+
+    # Action word can be anywhere (title or summary)
+    return any(k in combined for k in [
         "apply", "application", "opportunity", "hiring",
         "available", "2026", "invited", "register", "programme",
     ])
-    has_bad = any(k in text for k in BAD_KEYWORDS)
-    return has_job and has_act and not has_bad
 
 
 def is_real_url(url):
