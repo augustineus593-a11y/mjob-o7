@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Privacy Policy — Kara Job Updates</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Inter:wght@300;400;500&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a0a;
+      --surface:  #111111;
+      --border:   #222222;
+      --accent:   #f5c518;
+      --text:     #e8e8e8;
+      --muted:    #888888;
+      --radius:   12px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-weight: 300;
+      line-height: 1.75;
+      min-height: 100vh;
+    }
+
+    /* ── hero bar ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 2.5rem 2rem 2rem;
+      text-align: center;
+    }
+
+    .badge {
+      display: inline-block;
+      background: var(--accent);
+      color: #000;
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 0.65rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 0.3rem 0.8rem;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+    }
+
+    header h1 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: clamp(1.8rem, 5vw, 3rem);
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+    }
+
+    header h1 span { color: var(--accent); }
+
+    header p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 0.6rem;
+    }
+
+    /* ── layout ── */
+    main {
+      max-width: 760px;
+      margin: 3rem auto;
+      padding: 0 1.5rem 4rem;
+    }
+
+    /* ── section card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2rem 2.2rem;
+      margin-bottom: 1.5rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0;
+      width: 3px; height: 100%;
+      background: var(--accent);
+      border-radius: var(--radius) 0 0 var(--radius);
+    }
+
+    .card h2 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+      margin-bottom: 0.9rem;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .card p, .card li {
+      font-size: 0.93rem;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+
+    .card ul {
+      padding-left: 1.4rem;
+      margin-top: 0.4rem;
+    }
+
+    .card li { margin-bottom: 0.35rem; }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── footer ── */
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.8rem;
+      padding: 2rem;
+      border-top: 1px solid var(--border);
+    }
+
+    footer strong { color: var(--accent); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="badge">Legal</div>
+  <h1>Privacy <span>Policy</span></h1>
+  <p>Kara Job Updates &nbsp;·&nbsp; KuvukilandBot &nbsp;·&nbsp; Last updated: April 2026</p>
+</header>
+
+<main>
+
+  <div class="card">
+    <h2>1. Who We Are</h2>
+    <p>
+      <strong>Kara Job Updates</strong> is a free Facebook Page and automated bot
+      (<em>KuvukilandBot</em>) that shares job opportunities, learnerships,
+      internships, and bursaries for unemployed youth in South Africa.
+      We are not a recruitment agency and do not charge any fees.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>2. What Information We Collect</h2>
+    <p>We do <strong>not</strong> collect, store, or process any personal information from visitors or followers. Specifically:</p>
+    <ul>
+      <li>We do not collect your name, email address, phone number, or ID number.</li>
+      <li>We do not use cookies or tracking pixels on this page.</li>
+      <li>We do not run any forms that capture user data.</li>
+      <li>We do not sell or share any data with third parties.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>3. How the Bot Works</h2>
+    <p>
+      KuvukilandBot is an automated script that reads publicly available job listing
+      websites (RSS feeds and public web pages) and reposts summaries to the
+      Kara Job Updates Facebook Page using the Facebook Graph API.
+    </p>
+    <p>
+      The bot only reads public job listing data — it does not interact with,
+      read, or store any information about Facebook users or page followers.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>4. Facebook Data</h2>
+    <p>
+      This app uses the Facebook Graph API solely to publish posts to the
+      Kara Job Updates Facebook Page. We use the following permission:
+    </p>
+    <ul>
+      <li><strong>pages_manage_posts</strong> — to publish job listing posts to our own page.</li>
+    </ul>
+    <p>
+      We do not request access to any user's personal Facebook data, friends list,
+      messages, or any other user information.
+    </p>
+    <p>
+      Facebook's own privacy policy applies to all interactions on their platform:
+      <a href="https://www.facebook.com/policy.php" target="_blank">facebook.com/policy.php</a>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>5. Third-Party Links</h2>
+    <p>
+      Posts on our page contain links to third-party job listing websites.
+      We are not responsible for the privacy practices or content of those external sites.
+      Always review their privacy policies before submitting any personal information.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>6. Children's Privacy</h2>
+    <p>
+      Our page is intended for job seekers aged 18 and older.
+      We do not knowingly collect any information from children under 18.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>7. Changes to This Policy</h2>
+    <p>
+      We may update this privacy policy from time to time.
+      Any changes will be reflected on this page with an updated date at the top.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>8. Contact Us</h2>
+    <p>If you have any questions about this privacy policy, you can reach us at:</p>
+    <ul>
+      <li>Email: <a href="mailto:karajjobe@gmail.com">karajjobe@gmail.com</a></li>
+      <li>Facebook: <a href="https://www.facebook.com/KaraJobUpdates" target="_blank">facebook.com/KaraJobUpdates</a></li>
+    </ul>
+  </div>
+
+</main>
+
+<footer>
+  <p>&copy; 2026 <strong>Kara Job Updates</strong> &nbsp;·&nbsp; All rights reserved &nbsp;·&nbsp; South Africa</p>
+</footer>
+
+</body>
+</html>
