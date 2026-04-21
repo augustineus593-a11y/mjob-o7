@@ -1,15 +1,11 @@
 """
-Kuvukiland Job Bot v7
-- Requirements extracted exactly as written in the advertisement
-- Qualification match anchored to requirements section only (no footer junk)
-- Gossip/entertainment articles blocked
-- 2026 year enforcement via confirm_current_year() at article-visit stage
-- "2024"/"2025" removed from BAD_KEYWORDS — year filtering now happens AFTER
-  visiting the article, not at RSS title stage (fixes Learnerships24 drought)
-- Posts up to 6 per run, runs every 10 minutes via GitHub Actions
-- v7: No fake defaults — qualification/requirements say "See full advert"
-  if nothing concrete is found. Qualification regex tightened to capture
-  the full phrase, not a lone word like "diploma" or "matric".
+Kara Job Updates — Job Bot v9
+Changes from v8:
+- Added Kazi Jobs (main feed + job-opportunities category feed) to RSS_SOURCES
+- Added scrape_kazijobs() for HTML fallback when RSS is thin
+- SAYouth.mobi: cannot be scraped (login-gated, no RSS) — added a periodic
+  awareness post reminding followers to register at sayouth.mobi directly
+- SAYouth awareness post fires once per day max (tracked in posted.txt)
 """
 
 import os, re, time, requests, random
@@ -66,14 +62,21 @@ BAD_KEYWORDS = [
 ]
 
 RSS_SOURCES = [
-    {"url": "https://www.salearnership.co.za/feed/",     "source": "SA Learnership"},
-    {"url": "https://learnerships24.co.za/feed/",        "source": "Learnerships24"},
-    {"url": "https://youthvillage.co.za/feed/",          "source": "Youth Village SA"},
-    {"url": "https://learnerships.net/feed/",            "source": "Learnerships.net"},
-    {"url": "https://southafricain.com/feed/",           "source": "South Africa In"},
-    {"url": "https://www.salearnershipjobs.co.za/feed/", "source": "SA Learnership Jobs"},
-    {"url": "https://zaboutjobs.com/feed/",              "source": "ZA Jobs"},
+    {"url": "https://www.salearnership.co.za/feed/",                          "source": "SA Learnership"},
+    {"url": "https://learnerships24.co.za/feed/",                             "source": "Learnerships24"},
+    {"url": "https://youthvillage.co.za/feed/",                               "source": "Youth Village SA"},
+    {"url": "https://learnerships.net/feed/",                                  "source": "Learnerships.net"},
+    {"url": "https://southafricain.com/feed/",                                 "source": "South Africa In"},
+    {"url": "https://www.salearnershipjobs.co.za/feed/",                       "source": "SA Learnership Jobs"},
+    {"url": "https://zaboutjobs.com/feed/",                                    "source": "ZA Jobs"},
+    # Kazi Jobs — main feed AND category feed for job opportunities
+    {"url": "https://www.kazi-jobs.co.za/feed/",                               "source": "Kazi Jobs"},
+    {"url": "https://www.kazi-jobs.co.za/category/job-opportunies/feed/",      "source": "Kazi Jobs"},
 ]
+
+# SAYouth.mobi is a login-gated platform with no public RSS — it cannot be scraped.
+# The bot handles this with a once-daily awareness post (see post_sayouth_awareness()).
+SAYOUTH_AWARENESS_KEY = "sayouth_awareness_" + datetime.now().strftime("%Y-%m-%d")
 
 MONTH_MAP = {
     "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
@@ -99,6 +102,28 @@ JUNK_PHRASES = [
 ]
 
 CURRENT_YEAR = str(datetime.now().year)   # "2026"
+
+
+# ─────────────────────────────────────────────
+# TITLE CASING — preserve ALL-CAPS abbreviations
+# ─────────────────────────────────────────────
+
+def smart_title(text):
+    """
+    Title-case a string but preserve ALL-CAPS words (abbreviations like NTT, SAB, SETA).
+    A word that is already fully uppercase and ≥ 2 characters stays uppercase.
+    Mixed-case or lowercase words are capitalised normally.
+    """
+    words = text.split()
+    result = []
+    for word in words:
+        core = word.rstrip('.,;:()')          # strip trailing punctuation for the check
+        suffix = word[len(core):]             # keep the punctuation
+        if len(core) >= 2 and core.isupper():
+            result.append(word)               # keep abbreviation as-is
+        else:
+            result.append(core.capitalize() + suffix)
+    return ' '.join(result)
 
 
 # ─────────────────────────────────────────────
@@ -134,9 +159,6 @@ def is_junk(val):
 # ─────────────────────────────────────────────
 
 def confirm_current_year(title, article_plain_text):
-    """
-    Returns True if the listing is confirmed to be for the current year (2026).
-    """
     if CURRENT_YEAR in title:
         return True
     if CURRENT_YEAR in article_plain_text[:5000]:
@@ -222,19 +244,6 @@ def extract_bullets(section_text, max_items=5):
 # ─────────────────────────────────────────────
 
 def extract_qualification(text):
-    """
-    Extract the qualification exactly as stated in the ad.
-    Only returns a value when the full phrase is meaningful and concrete.
-    Returns None if nothing reliable is found — caller must NOT substitute a
-    fake default like "Grade 12 / Matric".
-
-    Strategy:
-    1. Try labelled patterns first (e.g. "Qualification: National Diploma in X")
-    2. Fall back to standalone sentence-level patterns
-    3. Validate: result must be long enough and contain a real qualification noun
-    4. Reject lone single words like "diploma" or "matric" without context
-    """
-
     QUAL_NOUNS = [
         'grade 12', 'grade12', 'matric', 'national senior certificate',
         'national certificate', 'national diploma', 'higher certificate',
@@ -243,7 +252,6 @@ def extract_qualification(text):
         'trade test', 'artisan', 'certificate',
     ]
 
-    # ── Step 1: labelled patterns ────────────────────────────────
     labelled = [
         r'[Qq]ualification(?:s)?\s*[:\-]\s*([^\n\r]{10,120})',
         r'[Ee]ducation(?:al\s+[Rr]equirement)?\s*[:\-]\s*([^\n\r]{10,100})',
@@ -258,13 +266,10 @@ def extract_qualification(text):
             if val and _qual_is_valid(val, QUAL_NOUNS):
                 return val
 
-    # ── Step 2: standalone full-phrase patterns ──────────────────
     standalone = [
-        # "Grade 12 / National Senior Certificate" style
         r'(Grade\s+12[^.\n\r]{0,100})',
         r'(Matric(?:ulation)?(?:\s+Certificate)?[^.\n\r]{0,80})',
         r'(National\s+Senior\s+Certificate[^.\n\r]{0,80})',
-        # Diploma / Degree lines  — must be ≥ 15 chars to avoid lone "diploma"
         r'((?:National\s+)?Diploma\s+in\s+[^.\n\r]{5,100})',
         r'((?:National\s+)?Diploma\s+(?:or|and)\s+[^.\n\r]{5,80})',
         r'(Higher\s+Certificate\s+in\s+[^.\n\r]{5,80})',
@@ -273,7 +278,6 @@ def extract_qualification(text):
         r'(B\.?Tech\s+in\s+[^.\n\r]{5,80})',
         r'(NQF\s+Level\s+\d[^.\n\r]{0,60})',
         r'(Trade\s+Test[^.\n\r]{0,60})',
-        # Bullet-style: "• Diploma in Mechanical Engineering"
         r'[•·\-–*]\s+((?:Diploma|Degree|Certificate|Matric|Grade\s+12)[^.\n\r]{5,100})',
     ]
     for pat in standalone:
@@ -283,30 +287,23 @@ def extract_qualification(text):
             if val and _qual_is_valid(val, QUAL_NOUNS) and len(val) >= 12:
                 return val
 
-    return None   # Nothing found — do NOT guess
+    return None
 
 
 def _clean_qual(val):
-    """Trim junk from extracted qualification string."""
     val = val.strip()
-    # Cut at pipe, semicolon, or obvious junk start
     val = re.split(r'[|;]', val)[0].strip()
-    # Remove trailing punctuation noise
     val = val.rstrip('.,;:-()')
-    # Strip junk phrases
     for jp in JUNK_PHRASES:
         idx = val.lower().find(jp)
         if idx > 0:
             val = val[:idx].strip()
-    # Hard cap
     val = val[:120]
-    # Remove control chars
     val = re.sub(r'[{}\[\]<>@#=]', '', val).strip()
     return val
 
 
 def _qual_is_valid(val, qual_nouns):
-    """Check the value contains a real qualification noun and isn't junk."""
     if not val or len(val) < 4:
         return False
     if is_junk(val):
@@ -320,10 +317,6 @@ def _qual_is_valid(val, qual_nouns):
 # ─────────────────────────────────────────────
 
 def extract_article_details(url, title=""):
-    """
-    Visit the article and extract real details.
-    Returns None if the listing cannot be confirmed as current-year (stale).
-    """
     details = {}
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -334,12 +327,10 @@ def extract_article_details(url, title=""):
         main_html = get_main_content(r.text)
         plain = strip_html(main_html)
 
-        # ── YEAR CHECK — reject stale listings ───────────────────
         if not confirm_current_year(title, plain):
             print(f"   ❌ No '{CURRENT_YEAR}' found in title or article — skipping stale listing")
             return None
 
-        # ── CLOSING DATE ─────────────────────────────────────────
         for pat in [
             r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\d{1,2}[\s/\-]\w+[\s/\-]\d{4})',
             r'[Cc]losing\s+[Dd]ate\s*[:\-]\s*(\w+\s+\d{1,2},?\s+\d{4})',
@@ -359,7 +350,6 @@ def extract_article_details(url, title=""):
                     details["closing_date_obj"] = parsed
                     break
 
-        # ── LOCATION ─────────────────────────────────────────────
         for pat in [
             r'[Ll]ocation\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,60})',
             r'[Cc]ity\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
@@ -378,7 +368,6 @@ def extract_article_details(url, title=""):
                     details["location"] = val
                     break
 
-        # ── REQUIREMENTS SECTION ─────────────────────────────────
         req_section = find_section(
             plain,
             r'[Rr]equirements?\s*[:\-]',
@@ -389,16 +378,12 @@ def extract_article_details(url, title=""):
             r'[Tt]o\s+[Qq]ualify\s*[:\-]?',
         )
 
-        # ── QUALIFICATION — exact, from requirements section first ─
-        # Try requirements section first, fall back to full article
         qual = extract_qualification(req_section) if req_section else None
         if not qual:
             qual = extract_qualification(plain[:3000])
         if qual:
             details["qualification"] = qual
-        # If still nothing → details["qualification"] is simply absent (no fake default)
 
-        # ── REQUIREMENTS BULLETS ─────────────────────────────────
         if req_section:
             bullets = extract_bullets(req_section, max_items=5)
             clean_bullets = []
@@ -412,7 +397,6 @@ def extract_article_details(url, title=""):
             if clean_bullets:
                 details["requirements"] = clean_bullets
 
-        # ── EXPERIENCE ───────────────────────────────────────────
         for pat in [
             r'[Ee]xperience\s+[Rr]equired\s*[:\-]\s*([^\n\r]{3,80})',
             r'[Ww]ork\s+[Ee]xperience\s*[:\-]\s*([^\n\r]{3,80})',
@@ -432,7 +416,6 @@ def extract_article_details(url, title=""):
                     details["experience"] = val
                     break
 
-        # ── AGE ──────────────────────────────────────────────────
         for pat in [
             r'[Aa]ge\s*[:\-]\s*(\d{2}\s*[-–to]+\s*\d{2}\s*years?)',
             r'[Aa]ged?\s+(\d{2}\s*[-–to]+\s*\d{2}\s*years?)',
@@ -447,7 +430,6 @@ def extract_article_details(url, title=""):
                     details["age"] = val
                     break
 
-        # ── POSITIONS ────────────────────────────────────────────
         for pat in [
             r'\(X?\s*(\d+)\s*[Pp]osts?\)',
             r'\(X?\s*(\d+)\s*[Pp]ositions?\)',
@@ -465,7 +447,6 @@ def extract_article_details(url, title=""):
                     details["positions"] = val
                     break
 
-        # ── STIPEND / SALARY ─────────────────────────────────────
         for pat in [
             r'[Ss]tipend\s*[:\-]\s*(R\s*[\d\s,]+(?:\s*per\s+month)?)',
             r'[Ss]alary\s*[:\-]\s*(R\s*[\d\s,]+(?:\s*per\s+(?:month|annum))?)',
@@ -478,6 +459,19 @@ def extract_article_details(url, title=""):
                     details["stipend"] = val
                     break
 
+        # Detect opportunity type for conversational opener
+        title_lower = plain[:200].lower() + " " + details.get("qualification", "").lower()
+        if "learnership" in title_lower:
+            details["opp_type"] = "learnership"
+        elif "internship" in title_lower:
+            details["opp_type"] = "internship"
+        elif "apprentice" in title_lower:
+            details["opp_type"] = "apprenticeship"
+        elif "bursary" in title_lower:
+            details["opp_type"] = "bursary"
+        else:
+            details["opp_type"] = "opportunity"
+
         print(f"   Fields found: {[k for k in details if k != 'closing_date_obj']}")
 
     except Exception as e:
@@ -487,61 +481,127 @@ def extract_article_details(url, title=""):
 
 
 # ─────────────────────────────────────────────
-# POST BUILDER (v7 — no fake defaults)
+# POST BUILDER — v8: conversational, human tone
+# No image preview: link NOT passed to Facebook API separately
 # ─────────────────────────────────────────────
 
 def build_post(title, details, direct_url, source):
+    # Clean up the title — strip site suffix, then apply smart casing
     title = SITE_SUFFIXES.sub('', title).strip()
-    lines = ["🔌 Nasi iSpan 🚨", "", f"💼 {title}", ""]
+    title = smart_title(title)
 
-    if details.get("positions"):
-        lines.append(f"📌 Posts Available: {details['positions']}")
+    opp_type = details.get("opp_type", "opportunity")
+    qual = details.get("qualification", "")
+    exp = details.get("experience", "")
+    location = details.get("location", "")
+    closing = details.get("closing_date", "")
+    stipend = details.get("stipend", "")
+    age = details.get("age", "")
+    reqs = details.get("requirements", [])
+    positions = details.get("positions", "")
+
+    # ── Conversational opener ─────────────────────────────────────
+    # Detect if it's entry-level / grade 12 based
+    is_entry = (
+        "grade 12" in qual.lower()
+        or "matric" in qual.lower()
+        or "entry" in exp.lower()
+        or "no experience" in exp.lower()
+    ) if (qual or exp) else False
+
+    # Extract company name from title (first 1–3 words before a keyword)
+    company_match = re.match(
+        r'^([\w\s&\-]+?)\s+(?:Learnership|Internship|Apprenticeship|Bursary|'
+        r'Graduate|Vacancy|Programme|Opportunity)',
+        title, re.I
+    )
+    company = company_match.group(1).strip() if company_match else ""
+
+    if is_entry and company:
+        opener = (
+            f"🚨 {company} is offering a {opp_type} and they only need "
+            f"Grade 12 — no experience required! "
+            f"Don't sleep on this one 🔥"
+        )
+    elif is_entry:
+        opener = (
+            f"🚨 I found a {opp_type} that only requires Grade 12 "
+            f"with no experience needed! This is for you 🔥"
+        )
+    elif company:
+        opener = (
+            f"🚨 {company} is hiring! They have a {opp_type} open "
+            f"right now — check if you qualify 👇"
+        )
+    else:
+        opener = (
+            f"🚨 There's a {opp_type} available and applications are open! "
+            f"Check the requirements below 👇"
+        )
+
+    lines = [opener, "", f"📌 {title}", ""]
+
+    # ── Minimum requirements block ────────────────────────────────
+    lines.append("Minimum Requirements:")
+    lines.append("")
+
+    if qual:
+        lines.append(f"> Must have {qual}")
+    if exp and "entry" not in exp.lower():
+        lines.append(f"> {exp}")
+    elif exp and "entry" in exp.lower():
+        lines.append(f"> Entry-level — no experience needed")
+    if "no experience" in exp.lower() or "no work experience" in exp.lower():
+        lines.append(f"> No work experience required")
+
+    for req in reqs[:5]:
+        # Avoid duplicating qual/exp info already listed
+        ql = qual.lower()
+        if ql and req.lower() in ql:
+            continue
+        lines.append(f"> {req}")
+
+    if age:
+        lines.append(f"> Must be between {age}")
+
+    # If we got absolutely nothing, say so
+    if not qual and not exp and not reqs:
+        lines.append("> See full advert for requirements")
+
+    lines.append("")
+
+    # ── Stipend / salary ──────────────────────────────────────────
+    if stipend:
+        lines.append(f"💰 Stipend / Salary: {stipend}")
         lines.append("")
 
-    lines.append("📋 Requirements:")
+    if positions:
+        lines.append(f"📋 Posts Available: {positions}")
+        lines.append("")
 
-    # ── Qualification: exact from advert, or honest fallback ─────
-    qual = details.get("qualification")
-    if qual:
-        lines.append(f"✔ Qualification: {qual}")
+    # ── Location & closing date ───────────────────────────────────
+    if location:
+        lines.append(f"📍 Location — {location}")
     else:
-        lines.append("✔ Qualification: See full advert")
+        lines.append("📍 Location — See advert")
 
-    # ── Experience or requirement bullets ────────────────────────
-    exp = details.get("experience")
-    if exp:
-        lines.append(f"✔ Experience: {exp}")
-
-    reqs = details.get("requirements", [])
-    if reqs:
-        for req in reqs[:4]:
-            lines.append(f"✔ {req}")
-    elif not exp and not qual:
-        # Nothing at all found — direct them to the advert
-        lines.append("✔ See full advert for all requirements")
-
-    if details.get("age"):
-        lines.append(f"✔ Age: {details['age']}")
-
-    if details.get("stipend"):
-        lines.append(f"💰 Stipend: {details['stipend']}")
+    if closing:
+        lines.append(f"📅 Closing Date — {closing}")
+    else:
+        lines.append("📅 Closing Date — See advert")
 
     lines.append("")
-    lines.append(f"📍 Location: {details.get('location', 'See full advert')}")
-    lines.append(f"📅 Closing Date: {details.get('closing_date', 'See full advert')}")
-    lines.append(f"🌐 Source: {source}")
-    lines.append("")
-    lines.append("👇 Click to read full details & apply:")
+    lines.append("👇 Click here to apply:")
     lines.append(direct_url)
     lines.append("")
-    lines.append("💡 Share this — help a young person get this opportunity!")
-    lines.append("👉 Follow Kuvukiland for fresh daily opportunities")
+    lines.append("Share this with someone who needs it 🙏 Let's help each other!")
     lines.append("")
     lines.append(
         "#Learnership #EntryLevel #Grade12Jobs #YouthEmployment "
-        "#SouthAfrica #Matric #NoExperience #KuvukilandJobs "
-        "#Internship #GovernmentJobs #SETA #Kuvukiland"
+        "#SouthAfrica #Matric #NoExperience #KaraJobUpdates "
+        "#Internship #GovernmentJobs #SETA #JobAlert"
     )
+
     return "\n".join(lines)
 
 
@@ -639,14 +699,18 @@ def get_item_link(item):
     return None
 
 
-def post_to_facebook(message, link):
+def post_to_facebook(message):
+    """
+    Posts message-only to Facebook — NO link parameter.
+    This prevents Facebook from generating an image preview/thumbnail card.
+    The apply link lives in the message body itself.
+    """
     if not PAGE_TOKEN:
         print("❌ FB_PAGE_TOKEN not set.")
         return None
     try:
         r = requests.post(GRAPH_URL, data={
             "message": message,
-            "link": link,
             "access_token": PAGE_TOKEN,
             "published": "true",
         }, timeout=20)
@@ -700,6 +764,115 @@ def scrape_edupstairs():
 
 
 # ─────────────────────────────────────────────
+# KAZI JOBS HTML SCRAPER
+# (fallback in case the RSS feed is thin or slow to update)
+# ─────────────────────────────────────────────
+
+def scrape_kazijobs():
+    """
+    Scrape kazi-jobs.co.za/category/job-opportunies/ for listings not yet
+    caught by the RSS feed.  Same pattern as scrape_edupstairs().
+    """
+    listings = []
+    url = "https://www.kazi-jobs.co.za/category/job-opportunies/"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            print(f"  Kazi Jobs HTML: HTTP {r.status_code}")
+            return listings
+
+        # Find all internal article links
+        links = re.findall(
+            r'href=["\']((https?://(?:www\.)?kazi-jobs\.co\.za/[^"\'#?]+))["\']',
+            r.text
+        )
+        seen = set()
+        for _, link in links:
+            link = link.rstrip("/")
+            # Skip nav/utility pages
+            if any(x in link for x in [
+                "/category/", "/tag/", "/page/", "/author/", "/feed",
+                ".jpg", ".png", "/about", "/contact", "/home",
+            ]):
+                continue
+            if link in seen or len(link) < 38:
+                continue
+            seen.add(link)
+
+            # Extract title from anchor text
+            pat = rf'href=["\']{re.escape(link)}["\'][^>]*>\s*([^<]{{5,150}})\s*<'
+            m = re.search(pat, r.text)
+            title = (m.group(1).strip() if m
+                     else link.split("/")[-1].replace("-", " ").title())
+            title = re.sub(r'<[^>]+>', '', title).strip()   # strip any stray HTML
+
+            if is_real_job(title, ""):
+                listings.append({
+                    "title": title[:120],
+                    "link": link,
+                    "source": "Kazi Jobs",
+                })
+                print(f"    Kazi Jobs ✔ {title[:65]}")
+
+        print(f"  Kazi Jobs HTML: {len(listings)} relevant listings")
+    except Exception as e:
+        print(f"  Kazi Jobs HTML error: {e}")
+    return listings
+
+
+# ─────────────────────────────────────────────
+# SAYOUTH AWARENESS POST
+# SAYouth.mobi is login-gated — no public RSS or scrapeable listings.
+# Instead we post a once-daily tip telling followers to register there.
+# ─────────────────────────────────────────────
+
+SAYOUTH_MESSAGE = """\
+🌐 Quick tip for my people 👇
+
+Did you know SAYouth.mobi has FREE job opportunities, learnerships, \
+internships and bursaries listed every day?
+
+All you need is a phone — no data needed on most networks (MTN, Vodacom, \
+Cell C, Telkom)! 📱
+
+Here's what to do:
+> Go to 👉 https://sayouth.mobi
+> Create a FREE profile
+> Browse hundreds of opportunities and apply directly
+
+Government jobs, retail, call centre, trades — it's all there. \
+And it costs you nothing 🙌
+
+Share this with someone who doesn't know about SAYouth yet. \
+You might just change their life 🙏
+
+#SAYouth #FreeJobs #Grade12Jobs #Learnership #YouthEmployment \
+#SouthAfrica #KaraJobUpdates #NoData #JobAlert"""
+
+
+def post_sayouth_awareness(already_posted):
+    """
+    Post the SAYouth awareness message once per calendar day.
+    Returns True if it was posted this run.
+    """
+    if SAYOUTH_AWARENESS_KEY in already_posted:
+        print("  SAYouth tip already posted today — skipping.")
+        return False
+
+    print("\n📢 Posting SAYouth.mobi awareness tip...")
+    print("--- SAYOUTH POST ---")
+    print(SAYOUTH_MESSAGE)
+    print("--------------------\n")
+
+    result = post_to_facebook(SAYOUTH_MESSAGE)
+    if result:
+        save_posted(SAYOUTH_AWARENESS_KEY)
+        print("✅ SAYouth tip posted!")
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────
 # FETCH ALL LISTINGS
 # ─────────────────────────────────────────────
 
@@ -742,6 +915,7 @@ def fetch_all_listings():
             print(f"  {src['source']} error: {e}")
 
     all_listings.extend(scrape_edupstairs())
+    all_listings.extend(scrape_kazijobs())
 
     seen, unique = set(), []
     for j in all_listings:
@@ -758,7 +932,7 @@ def fetch_all_listings():
 # ─────────────────────────────────────────────
 
 def main():
-    print(f"\n🤖 Kuvukiland Job Bot v7 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kara Job Updates — Job Bot v9 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml available\n" if LXML_AVAILABLE else "⚠️  lxml not available\n")
 
     already_posted = load_posted()
@@ -770,11 +944,17 @@ def main():
 
     print(f"\n✅ Total unique: {len(listings)}  |  🆕 New: {len(new_jobs)}\n")
 
-    if not new_jobs:
-        print("⏸  No new jobs this run — nothing posted.")
-        return
-
     posted_count = 0
+
+    # ── Post the SAYouth awareness tip once per day ───────────────
+    if post_sayouth_awareness(already_posted):
+        posted_count += 1
+        time.sleep(5)
+
+    if not new_jobs:
+        print("⏸  No new job listings this run — nothing else to post.")
+        print(f"\n🏁 Run complete — {posted_count} post(s) published this run.")
+        return
 
     for listing in new_jobs:
         if posted_count >= MAX_PER_RUN:
@@ -808,7 +988,7 @@ def main():
         print(post)
         print("--------------------\n")
 
-        result = post_to_facebook(post, listing["link"])
+        result = post_to_facebook(post)
         if result:
             save_posted(key)
             posted_count += 1
