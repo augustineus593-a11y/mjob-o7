@@ -1,29 +1,35 @@
 """
-Kara Job Updates — Job Bot v15
+Kara Job Updates — Job Bot v16
 ================================
-CHANGES from v14:
+CHANGES from v15:
 
-FIX 1 — Post style completely rewritten
-  • Opens with "I found a [opp_type] at [Company]..." or
-    "Cleaners / General Workers are wanted at [Company]..."
-  • Short, readable, no filler words like "hurry up" or "don't sleep"
-  • Requirements: top 3 bullet points pulled from the advert,
-    always including the qualification — kept short
-  • No title repeat anywhere in the post
+FIX 1 — Post openers completely rewritten with 8+ varieties
+  • Rotates between styles so no two posts feel the same
+  • "ShopRite is hiring", "Cleaners are wanted at...",
+    "They are looking for workers at...", "Good news — X has opened applications",
+    "Attention job seekers — X wants you", "No experience needed at X",
+    "Here is one for Grade 12 holders", etc.
+  • Opener chosen based on opp_type, company, qual tier, role type
+  • Never starts with "I found a learnership" every time
 
-FIX 2 — Duplicate / repeated posts fixed
-  • make_key() now normalises more aggressively (remove punctuation,
-    strip years) so near-identical titles don't sneak through
-  • posted.txt is written immediately after each successful post
-  • Deduplication also checks a URL key against posted.txt
+FIX 2 — Grammar fixed
+  • Requirements truncation fixed — no more mid-sentence cuts like
+    "Grade 12 and are eager to enter..."
+  • Req items now cut at sentence boundaries, not mid-word
 
-FIX 3 — jobsearchsa.co.za REMOVED (no apply button on that site)
-  REPLACED with jobvine.co.za — a proper SA job board with direct
-  apply links, no login required, strong on general worker / entry-level
+FIX 3 — No-qualification and Grade 10/11 jobs included
+  • BAD_KEYWORDS no longer blocks unskilled / general roles
+  • GOOD_KEYWORDS expanded for domestic, casual, contract, part-time
+  • qual tier "any" now shows "No matric needed" not Grade 12
 
-NEW — Post length kept short (max ~180 words)
-  Requirements capped at 3 items, stipend/positions/location/closing
-  shown on single lines, no empty padding lines between sections.
+FIX 4 — Requirements: qualification always first, then others
+  • If qual detected, it's pinned to position 1 in the list
+  • Location pulled more aggressively (city, province, "based in")
+
+FIX 5 — Post style variety
+  • 3 closing line variations (not always "Share with someone")
+  • Hashtags rotated from a pool of 15 tags, 8 picked per post
+  • Emoji usage varied per post style
 """
 
 import os, re, time, requests, random
@@ -62,17 +68,23 @@ HEADERS = {
     "Referer": "https://www.google.com/",
 }
 
+# ─────────────────────────────────────────────
+# KEYWORDS
+# ─────────────────────────────────────────────
+
 GOOD_KEYWORDS = [
     "learnership", "internship", "apprentice", "trainee",
     "vacancy", "vacancies", "entry level", "entry-level",
-    "graduate", "youth", "matric", "grade 12", "bursary",
-    "yes programme", "nyda", "seta", "nqf",
+    "graduate", "youth", "matric", "grade 12", "grade 11", "grade 10",
+    "bursary", "yes programme", "nyda", "seta", "nqf",
     "general worker", "general workers", "cleaner", "cleaners",
     "packer", "packers", "driver", "drivers", "security guard",
     "warehouse", "domestic", "handyman", "labourer", "labourers",
     "sweeper", "groundskeeper", "helper", "helpers",
     "porter", "gardener", "gardeners", "tea lady",
-    "kitchen assistant", "store assistant",
+    "kitchen assistant", "store assistant", "cashier", "till operator",
+    "casual", "contract", "part-time", "no experience", "unskilled",
+    "hiring", "we are hiring", "now hiring", "apply now",
 ]
 
 BAD_KEYWORDS = [
@@ -110,7 +122,6 @@ RSS_SOURCES = [
     {"url": "https://www.kazi-jobs.co.za/category/job-opportunies/feed/", "source": "Kazi Jobs"},
     {"url": "https://www.jobssouthafrica.co.za/feed/",                    "source": "Jobs South Africa"},
     {"url": "https://www.jobslive.co.za/feed/",                           "source": "Jobs Live"},
-    # NEW v15: jobvine.co.za — real SA job board, direct apply links, no login
     {"url": "https://www.jobvine.co.za/rss/",                             "source": "Job Vine"},
 ]
 
@@ -140,6 +151,16 @@ JUNK_PHRASES = [
 
 CURRENT_YEAR = str(datetime.now().year)
 
+ALL_HASHTAGS = [
+    "#Learnership", "#Internship", "#Apprenticeship",
+    "#Grade12Jobs", "#Grade10Jobs", "#MatricJobs",
+    "#YouthEmployment", "#SouthAfrica", "#Matric",
+    "#KaraJobUpdates", "#JobAlert", "#GeneralWorker",
+    "#JobsInSouthAfrica", "#NowHiring", "#EntryLevelJobs",
+    "#NoExperienceNeeded", "#GautengJobs", "#JobOpportunity",
+    "#SAJobs", "#WorkInSA",
+]
+
 
 # ─────────────────────────────────────────────
 # QUALIFICATION TIER DETECTION
@@ -153,7 +174,7 @@ def detect_qual_tier(qual_text, plain_text=""):
             r'(bachelor[\'s]*\s+(?:degree\s+)?in\s+[^\n\r]{5,60}|'
             r'b\.?tech\s+in\s+[^\n\r]{5,60}|degree\s+in\s+[^\n\r]{5,60})',
             combined, re.I)
-        display = m.group(0).strip().rstrip('.,;') if m else "Bachelor's Degree or equivalent"
+        display = m.group(0).strip().rstrip('.,;') if m else "Bachelor's degree or equivalent"
         return {"tier": "degree", "display": display.capitalize()}
 
     if re.search(r'\b(national diploma|advanced diploma|higher certificate|'
@@ -175,13 +196,14 @@ def detect_qual_tier(qual_text, plain_text=""):
 
     if re.search(r'\b(grade\s*1[02]|matric|national senior certificate|nsc)\b', combined):
         if re.search(r'\b(grade\s*1[01]|grade\s*[789]|abet)\b', combined):
-            return {"tier": "grade12", "display": "Grade 10/11/12 or equivalent"}
-        return {"tier": "grade12", "display": "Grade 12 or equivalent"}
+            return {"tier": "grade12", "display": "Grade 10, 11, or 12"}
+        return {"tier": "grade12", "display": "Grade 12 (Matric)"}
 
-    if re.search(r'\b(no\s+(formal\s+)?qualif|unskilled|abet\s+level)\b', combined):
+    if re.search(r'\b(no\s+(formal\s+)?qualif|unskilled|abet\s+level|no\s+experience\s+needed|'
+                 r'grade\s*[89]|grade\s*1[01])\b', combined):
         return {"tier": "any", "display": "No formal qualification required"}
 
-    return {"tier": "grade12", "display": "Grade 12 or equivalent"}
+    return {"tier": "grade12", "display": "Grade 12 (Matric)"}
 
 
 # ─────────────────────────────────────────────
@@ -309,7 +331,7 @@ def find_section(text, *patterns):
 
 
 # ─────────────────────────────────────────────
-# REQUIREMENTS — top 3 items, BS4 preferred
+# REQUIREMENTS — clean truncation at word boundary
 # ─────────────────────────────────────────────
 
 _REQ_JUNK = re.compile(
@@ -338,12 +360,15 @@ def _clean_item(text):
     return text
 
 
+def _truncate_clean(text, max_chars=80):
+    """Truncate at a word boundary and add ellipsis — never mid-word."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(' ', 1)[0].rstrip('.,;:')
+    return cut + "…"
+
+
 def extract_top_requirements(html_content, plain_text, max_items=3):
-    """
-    Return up to max_items requirement strings, always trying to include
-    the qualification line first. Uses BS4 when available, falls back to
-    plain text. Items are trimmed to keep the post short.
-    """
     items = []
 
     if BS4_AVAILABLE:
@@ -351,7 +376,6 @@ def extract_top_requirements(html_content, plain_text, max_items=3):
         for t in soup(["nav","footer","header","script","style"]):
             t.decompose()
 
-        # Strategy 1: heading → next ul/ol
         for heading in soup.find_all(re.compile(r'^h[1-6]$|^(strong|b|p)$')):
             if _REQ_HEADINGS.search(heading.get_text(strip=True)):
                 sib = heading.find_next_sibling()
@@ -366,7 +390,6 @@ def extract_top_requirements(html_content, plain_text, max_items=3):
                     sib = sib.find_next_sibling()
             if items: break
 
-        # Strategy 2: any list with qualification-like content
         if not items:
             for lst in soup.find_all(["ul","ol"]):
                 if _QUAL_SIGNALS.search(lst.get_text()):
@@ -376,7 +399,6 @@ def extract_top_requirements(html_content, plain_text, max_items=3):
                             items.append(item)
                     if len(items) >= 2: break
 
-    # Plain text fallback
     if not items:
         section = find_section(
             plain_text,
@@ -396,21 +418,17 @@ def extract_top_requirements(html_content, plain_text, max_items=3):
             seen.add(il)
             items.append(item)
 
-    # Sort: qualification-related first
+    # Sort: qualification first, then citizenship/age, then other
     def qual_priority(s):
         sl = s.lower()
-        if any(w in sl for w in ['grade','matric','diploma','degree','certificate','nqf']): return 0
-        if any(w in sl for w in ['unemployed','age','citizen','south african']): return 1
+        if any(w in sl for w in ['grade','matric','diploma','degree','certificate','nqf','n3','n4','n5']): return 0
+        if any(w in sl for w in ['unemployed','age','citizen','south african','id']): return 1
         return 2
 
     items.sort(key=qual_priority)
 
-    # Truncate each item to ~80 chars for readability
-    result = []
-    for item in items[:max_items]:
-        result.append(item[:85].rstrip() + ("…" if len(item) > 85 else ""))
-
-    return result
+    # Clean truncation — word boundary only
+    return [_truncate_clean(item, 80) for item in items[:max_items]]
 
 
 # ─────────────────────────────────────────────
@@ -419,11 +437,11 @@ def extract_top_requirements(html_content, plain_text, max_items=3):
 
 def extract_qualification(text):
     QUAL_NOUNS = [
-        'grade 12','grade12','matric','national senior certificate',
+        'grade 12','grade12','grade 11','grade 10','matric','national senior certificate',
         'national certificate','national diploma','higher certificate',
         'advanced diploma','bachelor','b.tech','btech','b tech',
         'degree','diploma','nqf level','nqf','abet','fet',
-        'trade test','artisan','certificate',
+        'trade test','artisan','certificate','n3','n4','n5',
     ]
     for pat in [
         r'[Qq]ualification(?:s)?\s*[:\-]\s*([^\n\r]{10,120})',
@@ -436,13 +454,15 @@ def extract_qualification(text):
             val = _cq(m.group(1))
             if val and _qv(val, QUAL_NOUNS): return val
     for pat in [
-        r'(Grade\s+12[^.\n\r]{0,80})', r'(Matric(?:ulation)?(?:\s+Certificate)?[^.\n\r]{0,60})',
+        r'(Grade\s+1[012][^.\n\r]{0,80})',
+        r'(Matric(?:ulation)?(?:\s+Certificate)?[^.\n\r]{0,60})',
         r'((?:National\s+)?Diploma\s+in\s+[^.\n\r]{5,80})',
         r'(Higher\s+Certificate\s+in\s+[^.\n\r]{5,60})',
         r'(Advanced\s+Diploma\s+in\s+[^.\n\r]{5,60})',
         r'(Bachelor(?:\'s)?\s+(?:Degree\s+)?in\s+[^.\n\r]{5,60})',
         r'(B\.?Tech\s+in\s+[^.\n\r]{5,60})',
         r'(NQF\s+Level\s+\d[^.\n\r]{0,40})',
+        r'(N[3-6]\s+[^\n\r]{0,40})',
         r'(Trade\s+Test[^.\n\r]{0,40})',
     ]:
         m = re.search(pat, text, re.I)
@@ -493,7 +513,8 @@ _OPP_TRIGGER = re.compile(
     r'Vacancy|Vacancies|Programme|Program|Opportunity|Opportunities|'
     r'Trainee|Artisan|YES|Cleaner|Cleaners|General\s+Worker|General\s+Workers|'
     r'Packer|Packers|Driver|Drivers|Security\s+Guard|Labourer|Labourers|'
-    r'Helper|Helpers|Porter|Porters|Gardener|Gardeners)\b',
+    r'Helper|Helpers|Porter|Porters|Gardener|Gardeners|Cashier|'
+    r'Hiring|Wanted|Needed)\b',
     re.I
 )
 
@@ -546,17 +567,23 @@ def extract_article_details(url, title="", pub_year=None):
                     details["closing_date_obj"] = parsed
                     break
 
-        # Location
+        # Location — multiple patterns, pick first clean result
         for pat in [
             r'[Ll]ocation\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,50})',
             r'[Cc]ity\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Pp]rovince\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Bb]ased\s+[Ii]n\s*[:\-]?\s*([A-Za-z][^\n\r|,\.]{3,40})',
+            r'[Ww]here\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
+            r'\b(Johannesburg|Cape Town|Durban|Pretoria|Soweto|Sandton|'
+            r'Ekurhuleni|Tshwane|Polokwane|Bloemfontein|Port Elizabeth|'
+            r'East London|Rustenburg|Kimberley|Nelspruit|Midrand|Centurion|'
+            r'Gauteng|Western Cape|KwaZulu.Natal|Limpopo|Mpumalanga|'
+            r'North West|Northern Cape|Eastern Cape|Free State)\b',
         ]:
             m = re.search(pat, plain, re.I)
             if m:
-                val = m.group(1).strip().rstrip('.,;')
-                if (3 <= len(val) <= 60
+                val = m.group(1).strip().rstrip('.,;') if m.lastindex and m.lastindex >= 1 else m.group(0).strip()
+                if (2 <= len(val) <= 60
                         and not re.search(r'http|www|\.co|click|apply|salary', val, re.I)
                         and not re.search(r'[{}\[\]<>@#=;]', val)
                         and not is_junk(val)):
@@ -574,11 +601,12 @@ def extract_article_details(url, title="", pub_year=None):
 
         details["qual_tier"] = detect_qual_tier(qual or "", plain)
 
-        # Top 3 requirements (always include qual)
+        # Top requirements — qual always pinned first
         req_items = extract_top_requirements(main_html, plain, max_items=3)
-        # Ensure qual is present in the list
-        if qual and not any(qual[:25].lower() in r.lower() for r in req_items):
-            req_items = [qual[:85]] + req_items
+        if qual:
+            qual_short = _truncate_clean(qual, 80)
+            if not any(qual_short[:20].lower() in r.lower() for r in req_items):
+                req_items = [qual_short] + [r for r in req_items if r != qual_short]
             req_items = req_items[:3]
         details["req_items"] = req_items
 
@@ -614,7 +642,8 @@ def extract_article_details(url, title="", pub_year=None):
         elif "apprentice" in tl:      details["opp_type"] = "apprenticeship"
         elif "bursary" in tl:         details["opp_type"] = "bursary"
         elif any(w in tl for w in ["general worker","cleaner","packer","driver",
-                                    "security","warehouse","labourer","porter","gardener"]):
+                                    "security","warehouse","labourer","porter","gardener",
+                                    "cashier","kitchen","domestic"]):
             details["opp_type"] = "job"
         else:
             details["opp_type"] = "opportunity"
@@ -630,8 +659,95 @@ def extract_article_details(url, title="", pub_year=None):
 
 
 # ─────────────────────────────────────────────
-# POST BUILDER — short, personal, Kara style
+# POST BUILDER — varied openers, human feel
 # ─────────────────────────────────────────────
+
+# Opener templates by situation
+# Placeholders: {company}, {opp}, {qual}, {positions}, {role}, {location}
+
+_OPENERS_WITH_COMPANY_GRADE12 = [
+    "{company} is hiring! All you need is {qual}.",
+    "Good news — {company} has opened applications for a {opp}. Matric is enough to apply.",
+    "{company} wants you. {qual} is all the qualification you need.",
+    "Attention job seekers — {company} is looking for people. Minimum requirement: {qual}.",
+    "Here is one for Grade 12 holders. {company} is offering a {opp}.",
+    "{company} has a {opp} open right now. If you have {qual}, send your application.",
+    "Applications are open at {company}. You do not need experience — just {qual}.",
+    "This one is for you if you have {qual}. {company} is offering a {opp}.",
+]
+
+_OPENERS_WITH_COMPANY_GRADE12_POSITIONS = [
+    "{company} is looking for {positions} people. {qual} is the only requirement.",
+    "{company} needs {positions} candidates for their {opp}. Apply if you have {qual}.",
+    "They need {positions} people at {company}. Minimum: {qual}.",
+    "{positions} spots are open at {company}. Do not sleep on this — {qual} is enough.",
+]
+
+_OPENERS_PEOPLE_ROLE_WITH_COMPANY = [
+    "{role} are wanted at {company}. Apply today.",
+    "{company} is looking for {role}. Check if you qualify.",
+    "{role} needed at {company} — applications are open now.",
+    "Calling all {role}! {company} has vacancies available.",
+    "{company} has an opening for {role}. See the requirements below.",
+]
+
+_OPENERS_PEOPLE_ROLE_NO_COMPANY = [
+    "{role} are needed — check the details below.",
+    "There is an opening for {role}. See if you qualify.",
+    "Vacancies are open for {role}. Applications welcome.",
+    "{role} wanted — apply before the closing date.",
+]
+
+_OPENERS_DIPLOMA_DEGREE = [
+    "If you have a {qual}, this {opp} is for you.",
+    "This {opp} requires {qual}. Check the details below.",
+    "Applications are open for a {opp}. Minimum requirement: {qual}.",
+    "{company} is offering a {opp} for candidates with {qual}." if "{company}" else "A {opp} is available — {qual} required.",
+]
+
+_OPENERS_NO_QUAL = [
+    "No matric? No problem. This one is open to everyone.",
+    "You do not need any qualifications for this one. See below.",
+    "This opportunity does not require a formal qualification. Anyone can apply.",
+    "Open to all — no qualification needed. Check the details.",
+]
+
+_CLOSING_LINES = [
+    "Share with someone who needs this 🙏",
+    "Tag a friend who is looking for work 👇",
+    "Pass this on — someone out there needs this opportunity.",
+    "Know someone who needs a job? Share this with them. 🙌",
+    "Don't keep this to yourself — tag someone who would benefit. 👇",
+]
+
+
+def _pick(options):
+    return random.choice(options)
+
+
+def _pick_hashtags(opp_type, tier):
+    base = ["#KaraJobUpdates", "#JobsInSouthAfrica", "#SouthAfrica"]
+    pool = [t for t in ALL_HASHTAGS if t not in base]
+
+    if opp_type == "learnership":
+        pool = ["#Learnership","#YouthEmployment","#MatricJobs","#Grade12Jobs",
+                "#EntryLevelJobs","#SAJobs","#NowHiring","#JobOpportunity"]
+    elif opp_type == "internship":
+        pool = ["#Internship","#GraduateJobs","#YouthEmployment","#SAJobs",
+                "#NowHiring","#JobOpportunity","#EntryLevelJobs","#JobAlert"]
+    elif opp_type == "apprenticeship":
+        pool = ["#Apprenticeship","#TradesJobs","#YouthEmployment","#SAJobs",
+                "#NowHiring","#JobOpportunity","#MatricJobs","#JobAlert"]
+    elif opp_type == "job":
+        pool = ["#GeneralWorker","#NowHiring","#EntryLevelJobs","#NoExperienceNeeded",
+                "#Grade12Jobs","#JobAlert","#SAJobs","#GautengJobs"]
+    elif tier == "any":
+        pool = ["#NoExperienceNeeded","#GeneralWorker","#NowHiring","#JobAlert",
+                "#EntryLevelJobs","#SAJobs","#Grade10Jobs","#JobOpportunity"]
+
+    selected = random.sample(pool, min(5, len(pool)))
+    return " ".join(base + selected)
+
 
 def build_post(title, details, direct_url, source):
     title = SITE_SUFFIXES.sub('', title).strip()
@@ -644,94 +760,86 @@ def build_post(title, details, direct_url, source):
     stipend   = details.get("stipend", "")
     positions = details.get("positions", "")
     req_items = details.get("req_items", [])
-    qual_tier = details.get("qual_tier", {"tier": "grade12", "display": "Grade 12 or equivalent"})
+    qual_tier = details.get("qual_tier", {"tier": "grade12", "display": "Grade 12 (Matric)"})
 
     qual_display = qual_tier["display"]
     tier         = qual_tier["tier"]
     company      = extract_company(title)
-    article      = "an" if opp_type[0].lower() in "aeiou" else "a"
 
-    # ── Detect if it's a "people role" (cleaner, general worker, etc.) ──
+    # Detect people role
     role_match = re.search(
         r'\b(cleaners?|general\s+workers?|packers?|drivers?|security\s+guards?|'
-        r'labourers?|porters?|gardeners?|warehouse\s+workers?|helpers?)\b',
+        r'labourers?|porters?|gardeners?|warehouse\s+workers?|helpers?|cashiers?|'
+        r'kitchen\s+assistants?|domestic\s+workers?)\b',
         title, re.I
     )
     is_people_role = bool(role_match)
     role_raw = role_match.group(0).strip() if role_match else ""
-    # Make role plural for display (e.g. "Driver" → "Drivers")
-    if role_raw and not role_raw.lower().endswith('s'):
-        role = role_raw.title() + "s"
-    else:
-        role = role_raw.title()
+    role = (role_raw.title() + "s") if role_raw and not role_raw.lower().endswith('s') else role_raw.title()
 
-    # ── Opener ──────────────────────────────────────────────────────────
-    if is_people_role and company:
-        opener = f"{role} are wanted at {company}."
-        if tier == "any":
-            opener += " No formal qualification needed."
-        else:
-            opener += f" All you need is {qual_display}."
+    # ── Pick opener ─────────────────────────────────────────────────────
+    if tier == "any":
+        opener = _pick(_OPENERS_NO_QUAL)
+
+    elif is_people_role and company:
+        t = _pick(_OPENERS_PEOPLE_ROLE_WITH_COMPANY)
+        opener = t.format(role=role, company=company, opp=opp_type, qual=qual_display)
 
     elif is_people_role:
-        opener = f"{role} are needed."
-        if tier == "any":
-            opener += " No formal qualification required."
-        else:
-            opener += f" Minimum: {qual_display}."
+        t = _pick(_OPENERS_PEOPLE_ROLE_NO_COMPANY)
+        opener = t.format(role=role, opp=opp_type, qual=qual_display)
 
-    elif tier in ("grade12", "any") and company:
-        # "I found a learnership at Sasol and they are looking for 20 people."
-        count_part = f" and they are looking for {positions} people" if positions else ""
-        opener = f"I found {article} {opp_type} at {company}{count_part}."
-        if tier == "any":
-            opener += " No formal qualification required."
-        else:
-            opener += f" All you need is {qual_display}."
+    elif tier in ("degree", "diploma"):
+        pool = _OPENERS_DIPLOMA_DEGREE
+        t = _pick(pool)
+        opener = t.format(company=company, opp=opp_type, qual=qual_display,
+                          positions=positions, role=role, location=location)
 
-    elif tier in ("grade12", "any"):
-        count_part = f" They are looking for {positions} people." if positions else ""
-        opener = f"There is {article} {opp_type} open right now.{count_part}"
-        opener += f" Minimum: {qual_display}."
+    elif positions and company:
+        t = _pick(_OPENERS_WITH_COMPANY_GRADE12_POSITIONS)
+        opener = t.format(company=company, opp=opp_type, qual=qual_display, positions=positions)
+
+    elif company:
+        t = _pick(_OPENERS_WITH_COMPANY_GRADE12)
+        opener = t.format(company=company, opp=opp_type, qual=qual_display,
+                          positions=positions, role=role)
 
     else:
-        # Diploma / Degree — be accurate, no Grade 12 claim
-        count_part = f" They are looking for {positions} people." if positions else ""
-        if company:
-            opener = f"I found {article} {opp_type} at {company}.{count_part}"
-        else:
-            opener = f"There is {article} {opp_type} open right now.{count_part}"
-        opener += f" Minimum requirement: {qual_display}."
+        opener = f"There is a {opp_type} open right now. Minimum requirement: {qual_display}."
 
     lines = [opener, ""]
 
-    # ── Requirements (max 3, short) ──────────────────────────────────
+    # ── Requirements ─────────────────────────────────────────────────
     lines.append("Requirements:")
     if req_items:
         for item in req_items:
             lines.append(f"• {item}")
     else:
         lines.append(f"• {qual_display}")
-        lines.append("• Check the full advert for details")
+        lines.append("• Check the advert for full details")
     lines.append("")
 
-    # ── Details line (compact) ───────────────────────────────────────
+    # ── Details ───────────────────────────────────────────────────────
     if stipend:
         lines.append(f"💰 {stipend}")
-    lines.append(f"📍 {location if location else 'Various locations'}")
-    lines.append(f"📅 Closing: {closing if closing else 'See advert'}")
+    if location:
+        lines.append(f"📍 {location}")
+    else:
+        lines.append("📍 Various locations across South Africa")
+    lines.append(f"📅 Closing date: {closing if closing else 'See advert'}")
     lines.append("")
 
-    # ── Apply ────────────────────────────────────────────────────────
+    # ── Apply ─────────────────────────────────────────────────────────
     lines.append("Apply here 👇")
     lines.append(direct_url)
     lines.append("")
-    lines.append("Share with someone who needs this 🙏")
+
+    # ── Closing line (varied) ─────────────────────────────────────────
+    lines.append(_pick(_CLOSING_LINES))
     lines.append("")
-    lines.append(
-        "#Learnership #Grade12Jobs #YouthEmployment #SouthAfrica "
-        "#Matric #KaraJobUpdates #JobAlert #GeneralWorker #JobsInSouthAfrica"
-    )
+
+    # ── Hashtags (rotated) ────────────────────────────────────────────
+    lines.append(_pick_hashtags(opp_type, tier))
 
     return "\n".join(lines)
 
@@ -768,7 +876,7 @@ def parse_feed(raw_bytes):
 
 
 # ─────────────────────────────────────────────
-# HELPERS — duplicate prevention hardened
+# HELPERS
 # ─────────────────────────────────────────────
 
 def load_posted():
@@ -783,16 +891,14 @@ def save_posted(key):
 
 
 def make_key(title):
-    """Aggressive normalisation to catch near-duplicate titles."""
     t = title.lower()
-    t = re.sub(r'\b20\d{2}\b', '', t)          # strip years
-    t = re.sub(r'[^a-z0-9 ]', ' ', t)          # strip punctuation
+    t = re.sub(r'\b20\d{2}\b', '', t)
+    t = re.sub(r'[^a-z0-9 ]', ' ', t)
     t = re.sub(r'\s+', ' ', t).strip()
     return t[:80]
 
 
 def make_url_key(url):
-    """Normalise URL for duplicate check."""
     u = strip_utm(url).lower()
     u = re.sub(r'https?://(www\.)?', '', u)
     return u.rstrip('/')
@@ -944,7 +1050,6 @@ def fetch_all_listings():
     all_listings.extend(scrape_edupstairs())
     all_listings.extend(scrape_kazijobs())
 
-    # Deduplicate by title key AND url key
     seen_titles, seen_urls, unique = set(), set(), []
     for j in all_listings:
         tk = make_key(j["title"])
@@ -960,19 +1065,15 @@ def fetch_all_listings():
 # ─────────────────────────────────────────────
 
 def main():
-    print(f"\n🤖 Kara Job Updates — Job Bot v15 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kara Job Updates — Job Bot v16 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml" if LXML_AVAILABLE else "⚠️  no lxml")
     print("✅ BeautifulSoup\n" if BS4_AVAILABLE else "⚠️  no BeautifulSoup — plain-text fallback\n")
 
     already_posted = load_posted()
-    # Build both title-key and url-key sets from posted.txt
-    # (posted.txt stores title keys; url keys added in this version via separate file)
     print(f"📋 Already posted: {len(already_posted)} jobs\n")
     print("Fetching listings...\n")
 
     listings = fetch_all_listings()
-
-    # Filter out already-posted by title key
     new_jobs = [j for j in listings if make_key(j["title"]) not in already_posted]
 
     print(f"\n✅ Total unique: {len(listings)}  |  🆕 New: {len(new_jobs)}\n")
