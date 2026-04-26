@@ -167,40 +167,54 @@ ALL_HASHTAGS = [
 # ─────────────────────────────────────────────
 
 def detect_qual_tier(qual_text, plain_text=""):
-    combined = (qual_text + " " + plain_text[:2000]).lower()
-
-    if re.search(r'\b(bachelor|b\.?tech|btech|b tech|degree)\b', combined):
+    """
+    Detect tier from qual_text ONLY (the extracted qualification field).
+    plain_text used only as fallback when qual_text is empty.
+    Highest tier wins — never pollute a Diploma post with Grade 12 found elsewhere.
+    """
+    primary = qual_text.strip()
+    if not primary:
         m = re.search(
-            r'(bachelor[\'s]*\s+(?:degree\s+)?in\s+[^\n\r]{5,60}|'
-            r'b\.?tech\s+in\s+[^\n\r]{5,60}|degree\s+in\s+[^\n\r]{5,60})',
-            combined, re.I)
+            r'(?:minimum\s+requirements?|requirements?|qualification)[:\-]\s*(.{20,400})',
+            plain_text, re.I | re.S)
+        primary = m.group(1) if m else plain_text[:400]
+
+    t = primary.lower()
+
+    if re.search(r'\b(bachelor|b\.?tech|btech|b\s+tech|honours|degree)\b', t):
+        m = re.search(
+            r'(bachelor[\'s]*\s+(?:degree\s+)?in\s+[^\n\r.,;]{5,60}|'
+            r'b\.?tech\s+in\s+[^\n\r.,;]{5,60}|'
+            r'degree\s+in\s+[^\n\r.,;]{5,60})',
+            primary, re.I)
         display = m.group(0).strip().rstrip('.,;') if m else "Bachelor's degree or equivalent"
         return {"tier": "degree", "display": display.capitalize()}
 
     if re.search(r'\b(national diploma|advanced diploma|higher certificate|'
-                 r'nd in|nqf level [5-9])\b', combined):
+                 r'nqf\s+level\s+[5-9]|nd\s+in)\b', t):
         m = re.search(
-            r'((?:national |advanced )?diploma\s+in\s+[^\n\r]{5,60}|'
-            r'higher certificate\s+in\s+[^\n\r]{5,60}|nqf level [5-9][^\n\r]{0,40})',
-            combined, re.I)
+            r'((?:national\s+|advanced\s+)?diploma\s+in\s+[^\n\r.,;]{5,60}|'
+            r'higher\s+certificate\s+in\s+[^\n\r.,;]{5,60}|'
+            r'nqf\s+level\s+[5-9][^\n\r.,;]{0,40})',
+            primary, re.I)
         display = m.group(0).strip().rstrip('.,;') if m else "National Diploma or equivalent"
         return {"tier": "diploma", "display": display.capitalize()}
 
-    if re.search(r'\b(n[23456]|ncv|tvet|trade test|artisan)\b', combined):
+    if re.search(r'\b(nqf\s+level\s+4|n[3-6]\s+certificate|n[3-6]\b|ncv|tvet|trade\s+test|artisan)\b', t):
         m = re.search(
-            r'(n[23456]\s+[^\n\r]{0,50}|ncv[^\n\r]{0,50}|'
-            r'trade test[^\n\r]{0,40}|artisan[^\n\r]{0,40})',
-            combined, re.I)
-        display = m.group(0).strip().rstrip('.,;') if m else "N-Certificate / NCV or equivalent"
+            r'(n[3-6]\s+[^\n\r.,;]{0,50}|ncv[^\n\r.,;]{0,50}|'
+            r'trade\s+test[^\n\r.,;]{0,40}|nqf\s+level\s+4[^\n\r.,;]{0,40})',
+            primary, re.I)
+        display = m.group(0).strip().rstrip('.,;') if m else "N-Certificate / Trade Test"
         return {"tier": "certificate", "display": display.capitalize()}
 
-    if re.search(r'\b(grade\s*1[02]|matric|national senior certificate|nsc)\b', combined):
-        if re.search(r'\b(grade\s*1[01]|grade\s*[789]|abet)\b', combined):
-            return {"tier": "grade12", "display": "Grade 10, 11, or 12"}
+    if re.search(r'\b(grade\s*12|matric|national\s+senior\s+certificate|nsc)\b', t):
         return {"tier": "grade12", "display": "Grade 12 (Matric)"}
 
-    if re.search(r'\b(no\s+(formal\s+)?qualif|unskilled|abet\s+level|no\s+experience\s+needed|'
-                 r'grade\s*[89]|grade\s*1[01])\b', combined):
+    if re.search(r'\b(grade\s*1[01])\b', t):
+        return {"tier": "grade1011", "display": "Grade 10 or 11"}
+
+    if re.search(r'\b(no\s+(formal\s+)?qualif|unskilled|abet|no\s+experience\s+needed|grade\s*[89])\b', t):
         return {"tier": "any", "display": "No formal qualification required"}
 
     return {"tier": "grade12", "display": "Grade 12 (Matric)"}
@@ -431,6 +445,42 @@ def extract_top_requirements(html_content, plain_text, max_items=3):
     return [_truncate_clean(item, 80) for item in items[:max_items]]
 
 
+def filter_req_items_by_tier(req_items, tier):
+    """
+    Remove bullets that contradict the detected tier.
+    e.g. if tier is 'diploma', drop bullets that say just 'Grade 12' as a
+    standalone requirement. Also drop items that end mid-sentence with a conjunction.
+    """
+    if not req_items:
+        return req_items
+
+    lower_qual_words = {
+        "degree":      ["grade 12", "grade12", "matric", "grade 10", "grade 11", "national senior"],
+        "diploma":     ["grade 12", "grade12", "matric", "grade 10", "grade 11", "national senior"],
+        "certificate": ["grade 12", "grade12", "matric", "grade 10", "national senior"],
+    }
+    blocklist = lower_qual_words.get(tier, [])
+
+    filtered = []
+    for item in req_items:
+        il = item.lower().strip()
+        # Skip bullets that are purely a lower-tier qualification standing alone
+        if blocklist and any(
+            il == w or il.startswith(w + " ") or il.startswith(w + "(") or il.startswith(w + ",")
+            for w in blocklist
+        ):
+            continue
+        # Skip items that end mid-sentence on a conjunction (bad truncation)
+        if re.search(r'\b(and|or|with|who|that|where|when|as|but)\s*[…]?\s*$', il):
+            continue
+        # Skip items that are just 1–2 words with no numbers (likely a heading)
+        if len(item.split()) <= 2 and not re.search(r'\d', item):
+            continue
+        filtered.append(item)
+
+    return filtered if filtered else req_items
+
+
 # ─────────────────────────────────────────────
 # QUALIFICATION EXTRACTION
 # ─────────────────────────────────────────────
@@ -599,15 +649,19 @@ def extract_article_details(url, title="", pub_year=None):
         qual = extract_qualification(req_section or "") or extract_qualification(plain[:3000])
         if qual: details["qualification"] = qual
 
-        details["qual_tier"] = detect_qual_tier(qual or "", plain)
+        # CRITICAL: only pass req_section as context — never full page.
+        # Full page always contains "Grade 12" somewhere, poisoning Diploma/Degree tier detection.
+        details["qual_tier"] = detect_qual_tier(qual or "", req_section or "")
 
-        # Top requirements — qual always pinned first
-        req_items = extract_top_requirements(main_html, plain, max_items=3)
+        # Top requirements — qual pinned first, then filtered by tier
+        tier = details["qual_tier"]["tier"]
+        req_items = extract_top_requirements(main_html, plain, max_items=4)
         if qual:
             qual_short = _truncate_clean(qual, 80)
             if not any(qual_short[:20].lower() in r.lower() for r in req_items):
                 req_items = [qual_short] + [r for r in req_items if r != qual_short]
-            req_items = req_items[:3]
+        # Remove bullets that contradict the detected tier, then cap at 3
+        req_items = filter_req_items_by_tier(req_items, tier)[:3]
         details["req_items"] = req_items
 
         # Positions
@@ -665,59 +719,109 @@ def extract_article_details(url, title="", pub_year=None):
 # Opener templates by situation
 # Placeholders: {company}, {opp}, {qual}, {positions}, {role}, {location}
 
-_OPENERS_WITH_COMPANY_GRADE12 = [
-    "{company} is hiring! All you need is {qual}.",
-    "Good news — {company} has opened applications for a {opp}. Matric is enough to apply.",
-    "{company} wants you. {qual} is all the qualification you need.",
-    "Attention job seekers — {company} is looking for people. Minimum requirement: {qual}.",
-    "Here is one for Grade 12 holders. {company} is offering a {opp}.",
-    "{company} has a {opp} open right now. If you have {qual}, send your application.",
-    "Applications are open at {company}. You do not need experience — just {qual}.",
-    "This one is for you if you have {qual}. {company} is offering a {opp}.",
+# ── Opener pools ─────────────────────────────────────────────────────────────
+# Each pool targets a specific situation. Placeholders: {company} {opp} {qual}
+# {positions} {role} {location}. All text must read like a real person wrote it.
+
+_OPENERS_GRADE12_WITH_COMPANY_POSITIONS = [
+    "{company} has {positions} spots open right now. Your Matric is all you need to apply.",
+    "Attention! {company} is filling {positions} positions. If you passed Grade 12, this is yours to apply for.",
+    "{company} is taking on {positions} new people. No degree, no diploma — just {qual}.",
+    "Here is something good — {company} needs {positions} candidates and Matric is enough to get in.",
 ]
 
-_OPENERS_WITH_COMPANY_GRADE12_POSITIONS = [
-    "{company} is looking for {positions} people. {qual} is the only requirement.",
-    "{company} needs {positions} candidates for their {opp}. Apply if you have {qual}.",
-    "They need {positions} people at {company}. Minimum: {qual}.",
-    "{positions} spots are open at {company}. Do not sleep on this — {qual} is enough.",
+_OPENERS_GRADE12_WITH_COMPANY = [
+    "{company} is hiring and your Matric qualifies you. Do not wait.",
+    "Great opportunity at {company}. Grade 12 is the only qualification they are asking for.",
+    "{company} has opened a {opp} — no experience required, just {qual}.",
+    "If you have been sitting at home with your Matric, {company} wants to hear from you.",
+    "{company} is offering a {opp} and they are not asking for a degree. {qual} is enough.",
+    "Doors are open at {company}. All you need to walk through them is {qual}.",
+    "This one goes to all Matric holders — {company} is accepting applications right now.",
+    "{company} does not care about work experience here. They just want people with {qual}.",
+]
+
+_OPENERS_GRADE1011_WITH_COMPANY = [
+    "{company} is hiring and you do not even need Matric. Grade 10 or 11 is enough.",
+    "Still in school or didn't finish? {company} is still open to you — {qual} qualifies.",
+    "{company} has a {opp} open for people with {qual}. Do not count yourself out.",
+    "Good news for those without Matric — {company} will accept {qual}.",
 ]
 
 _OPENERS_PEOPLE_ROLE_WITH_COMPANY = [
-    "{role} are wanted at {company}. Apply today.",
-    "{company} is looking for {role}. Check if you qualify.",
-    "{role} needed at {company} — applications are open now.",
-    "Calling all {role}! {company} has vacancies available.",
-    "{company} has an opening for {role}. See the requirements below.",
+    "{company} is looking for {role} right now. Apply before the closing date.",
+    "{role} wanted at {company} — vacancies are open and applications are being accepted.",
+    "{company} needs {role}. If that is you, your application is welcome.",
+    "Here is a job at {company}. They are specifically looking for {role}.",
+    "{company} has openings for {role}. See what they need below.",
+    "Work is available at {company}. They are currently recruiting {role}.",
 ]
 
 _OPENERS_PEOPLE_ROLE_NO_COMPANY = [
-    "{role} are needed — check the details below.",
-    "There is an opening for {role}. See if you qualify.",
-    "Vacancies are open for {role}. Applications welcome.",
-    "{role} wanted — apply before the closing date.",
+    "{role} are needed. Check the details and apply if you qualify.",
+    "Job alert — {role} vacancies are open. See the requirements below.",
+    "They are hiring {role}. Do not miss this one.",
+    "There is work available for {role}. Applications are open now.",
 ]
 
-_OPENERS_DIPLOMA_DEGREE = [
-    "If you have a {qual}, this {opp} is for you.",
-    "This {opp} requires {qual}. Check the details below.",
-    "Applications are open for a {opp}. Minimum requirement: {qual}.",
-    "{company} is offering a {opp} for candidates with {qual}." if "{company}" else "A {opp} is available — {qual} required.",
+_OPENERS_DIPLOMA_WITH_COMPANY = [
+    "{company} is looking for candidates with a {qual}. Applications are open.",
+    "Got a {qual}? {company} wants to hear from you — they have a {opp} available.",
+    "{company} is recruiting for a {opp}. Minimum qualification: {qual}.",
+    "This {opp} at {company} is for people who hold a {qual}. Check the details.",
+    "{company} needs qualified candidates. If you have a {qual}, this is your chance.",
+]
+
+_OPENERS_DIPLOMA_NO_COMPANY = [
+    "A {opp} is open and they are looking for people with a {qual}.",
+    "If you hold a {qual}, this {opp} could be for you. See the details below.",
+    "Applications are open for a {opp}. You will need a {qual} to qualify.",
+    "Here is a {opp} for qualified candidates. Minimum requirement: {qual}.",
+]
+
+_OPENERS_DEGREE_WITH_COMPANY = [
+    "{company} is looking for graduates. You need a {qual} to apply.",
+    "Graduates — {company} has a {opp} open for you. Minimum: {qual}.",
+    "{company} wants degree holders for their {opp}. If that is you, apply now.",
+    "This one is for graduates. {company} is recruiting and they need {qual}.",
+]
+
+_OPENERS_DEGREE_NO_COMPANY = [
+    "A graduate {opp} is open. You will need {qual} to be considered.",
+    "Graduates, this one is for you. A {opp} is available — {qual} required.",
+    "Applications are open for a graduate {opp}. Minimum qualification: {qual}.",
 ]
 
 _OPENERS_NO_QUAL = [
-    "No matric? No problem. This one is open to everyone.",
-    "You do not need any qualifications for this one. See below.",
-    "This opportunity does not require a formal qualification. Anyone can apply.",
-    "Open to all — no qualification needed. Check the details.",
+    "No matric, no experience — this one is still open to you. Check the details.",
+    "You do not need any qualifications for this opportunity. Anyone can apply.",
+    "This job does not ask for matric or experience. See if it is something you can do.",
+    "Here is one for people who have been told they are overqualified or underqualified — no formal qualification needed.",
+    "Work is available and no certificate is required. See the details below.",
+]
+
+_OPENERS_APPRENTICESHIP_WITH_COMPANY = [
+    "{company} is offering an apprenticeship. You will earn while you learn a trade — {qual} required.",
+    "Apprenticeship alert! {company} is taking on new learners. Minimum: {qual}.",
+    "{company} wants to train you in a trade. If you have {qual}, get your application in.",
+    "Build a career with your hands. {company} has an apprenticeship open — {qual} is enough to apply.",
+]
+
+_OPENERS_INTERNSHIP_WITH_COMPANY = [
+    "{company} is offering an internship. Get your foot in the door — {qual} required.",
+    "Internship available at {company}. They are looking for people with {qual}.",
+    "{company} has opened internship applications. Minimum qualification: {qual}.",
+    "Want real work experience? {company} has an internship and they need {qual}.",
 ]
 
 _CLOSING_LINES = [
-    "Share with someone who needs this 🙏",
-    "Tag a friend who is looking for work 👇",
-    "Pass this on — someone out there needs this opportunity.",
-    "Know someone who needs a job? Share this with them. 🙌",
-    "Don't keep this to yourself — tag someone who would benefit. 👇",
+    "Share with someone who needs this. 🙏",
+    "Tag a friend who is looking for work. 👇",
+    "Pass this on — someone out there is waiting for this opportunity.",
+    "Know someone without a job? Send this to them. 🙌",
+    "Do not keep this to yourself. Tag someone who needs it. 👇",
+    "Someone in your circle needs to see this. Share it.",
+    "If this is not for you, share it with someone it is for. 🙏",
 ]
 
 
@@ -778,34 +882,39 @@ def build_post(title, details, direct_url, source):
     role = (role_raw.title() + "s") if role_raw and not role_raw.lower().endswith('s') else role_raw.title()
 
     # ── Pick opener ─────────────────────────────────────────────────────
+    def fmt(t):
+        try:
+            return t.format(company=company, opp=opp_type, qual=qual_display,
+                            positions=positions, role=role, location=location)
+        except KeyError:
+            return t
+
     if tier == "any":
-        opener = _pick(_OPENERS_NO_QUAL)
-
+        opener = fmt(_pick(_OPENERS_NO_QUAL))
     elif is_people_role and company:
-        t = _pick(_OPENERS_PEOPLE_ROLE_WITH_COMPANY)
-        opener = t.format(role=role, company=company, opp=opp_type, qual=qual_display)
-
+        opener = fmt(_pick(_OPENERS_PEOPLE_ROLE_WITH_COMPANY))
     elif is_people_role:
-        t = _pick(_OPENERS_PEOPLE_ROLE_NO_COMPANY)
-        opener = t.format(role=role, opp=opp_type, qual=qual_display)
-
-    elif tier in ("degree", "diploma"):
-        pool = _OPENERS_DIPLOMA_DEGREE
-        t = _pick(pool)
-        opener = t.format(company=company, opp=opp_type, qual=qual_display,
-                          positions=positions, role=role, location=location)
-
+        opener = fmt(_pick(_OPENERS_PEOPLE_ROLE_NO_COMPANY))
+    elif opp_type == "apprenticeship" and company:
+        opener = fmt(_pick(_OPENERS_APPRENTICESHIP_WITH_COMPANY))
+    elif opp_type == "internship" and company:
+        opener = fmt(_pick(_OPENERS_INTERNSHIP_WITH_COMPANY))
+    elif tier == "degree" and company:
+        opener = fmt(_pick(_OPENERS_DEGREE_WITH_COMPANY))
+    elif tier == "degree":
+        opener = fmt(_pick(_OPENERS_DEGREE_NO_COMPANY))
+    elif tier in ("diploma", "certificate") and company:
+        opener = fmt(_pick(_OPENERS_DIPLOMA_WITH_COMPANY))
+    elif tier in ("diploma", "certificate"):
+        opener = fmt(_pick(_OPENERS_DIPLOMA_NO_COMPANY))
+    elif tier == "grade1011" and company:
+        opener = fmt(_pick(_OPENERS_GRADE1011_WITH_COMPANY))
     elif positions and company:
-        t = _pick(_OPENERS_WITH_COMPANY_GRADE12_POSITIONS)
-        opener = t.format(company=company, opp=opp_type, qual=qual_display, positions=positions)
-
+        opener = fmt(_pick(_OPENERS_GRADE12_WITH_COMPANY_POSITIONS))
     elif company:
-        t = _pick(_OPENERS_WITH_COMPANY_GRADE12)
-        opener = t.format(company=company, opp=opp_type, qual=qual_display,
-                          positions=positions, role=role)
-
+        opener = fmt(_pick(_OPENERS_GRADE12_WITH_COMPANY))
     else:
-        opener = f"There is a {opp_type} open right now. Minimum requirement: {qual_display}."
+        opener = f"A {opp_type} is open right now. Minimum: {qual_display}."
 
     lines = [opener, ""]
 
