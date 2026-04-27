@@ -1,5 +1,5 @@
 """
-Kara Job Updates — Job Bot v16
+Kara Job Updates — Job Bot v17
 ================================
 CHANGES from v15:
 
@@ -111,18 +111,15 @@ BAD_KEYWORDS = [
 ]
 
 RSS_SOURCES = [
+    # ✅ Confirmed working sources only
     {"url": "https://www.salearnership.co.za/feed/",                     "source": "SA Learnership"},
     {"url": "https://learnerships24.co.za/feed/",                        "source": "Learnerships24"},
     {"url": "https://youthvillage.co.za/feed/",                          "source": "Youth Village SA"},
-    {"url": "https://learnerships.net/feed/",                             "source": "Learnerships.net"},
-    {"url": "https://southafricain.com/feed/",                            "source": "South Africa In"},
-    {"url": "https://www.salearnershipjobs.co.za/feed/",                  "source": "SA Learnership Jobs"},
-    {"url": "https://zaboutjobs.com/feed/",                               "source": "ZA Jobs"},
     {"url": "https://www.kazi-jobs.co.za/feed/",                          "source": "Kazi Jobs"},
     {"url": "https://www.kazi-jobs.co.za/category/job-opportunies/feed/", "source": "Kazi Jobs"},
-    {"url": "https://www.jobssouthafrica.co.za/feed/",                    "source": "Jobs South Africa"},
-    {"url": "https://www.jobslive.co.za/feed/",                           "source": "Jobs Live"},
-    {"url": "https://www.jobvine.co.za/rss/",                             "source": "Job Vine"},
+    # ❌ Removed — consistently failing (403/connection errors):
+    # learnerships.net, southafricain.com, salearnershipjobs.co.za,
+    # zaboutjobs.com, jobslive.co.za, jobvine.co.za
 ]
 
 MONTH_MAP = {
@@ -1173,13 +1170,41 @@ def fetch_all_listings():
 # MAIN
 # ─────────────────────────────────────────────
 
+LAST_POSTED_FILE = "last_posted_time.txt"
+
+
+def save_last_posted_time():
+    with open(LAST_POSTED_FILE, "w") as f:
+        f.write(datetime.now().isoformat())
+
+
+def check_dry_spell():
+    """Warn in logs if no post has been made in 24+ hours."""
+    if not os.path.exists(LAST_POSTED_FILE):
+        print("ℹ️  No last-posted record yet.\n")
+        return
+    try:
+        with open(LAST_POSTED_FILE) as f:
+            last = datetime.fromisoformat(f.read().strip())
+        hours_ago = (datetime.now() - last).total_seconds() / 3600
+        if hours_ago >= 24:
+            print(f"⚠️  DRY SPELL WARNING: No post in {hours_ago:.0f} hours.")
+            print(f"   Last posted: {last.strftime('%Y-%m-%d %H:%M')}")
+            print(f"   Sources may be blocked or have no new content.\n")
+        else:
+            print(f"🕐 Last posted: {last.strftime('%Y-%m-%d %H:%M')} ({hours_ago:.0f}h ago)\n")
+    except Exception:
+        pass
+
+
 def main():
-    print(f"\n🤖 Kara Job Updates — Job Bot v16 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kara Job Updates — Job Bot v17 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml" if LXML_AVAILABLE else "⚠️  no lxml")
     print("✅ BeautifulSoup\n" if BS4_AVAILABLE else "⚠️  no BeautifulSoup — plain-text fallback\n")
 
     already_posted = load_posted()
-    print(f"📋 Already posted: {len(already_posted)} jobs\n")
+    print(f"📋 Already posted: {len(already_posted)} jobs")
+    check_dry_spell()
     print("Fetching listings...\n")
 
     listings = fetch_all_listings()
@@ -1226,6 +1251,7 @@ def main():
         result = post_to_facebook(post)
         if result:
             save_posted(key)
+            save_last_posted_time()
             posted_count += 1
             print(f"✅ Posted {posted_count}/{MAX_PER_RUN}")
             if posted_count < MAX_PER_RUN:
