@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-Kara Job Updates — post_jobs.py  v19
-Facebook auto-poster for Vuka Sizame Hub.
+Kara Job Updates — post_jobs.py  v20
+Facebook auto-poster for Kara Job Updates page.
 
-What changed in v19:
-  - Post intro is now a faithful 2–3 sentence SUMMARY of the actual advert
-    (no more random template openers — matches the manually-edited screenshot style)
-  - Requirements list is extracted more aggressively (up to 6 items)
-  - plain_text is stored on details dict and passed to build_post()
-  - All _OPENERS_* lists and extract_role_description() removed (no longer needed)
-  - Everything else (RSS fetch, dedup, Facebook posting, GitHub Actions) unchanged
+Fixes in v20 (vs v19):
+  1. NAV/BREADCRUMB LEAK — strip_html now kills <nav>, breadcrumb text
+     blocked in build_intro_summary via tighter para filter.
+  2. TABLE DUMP IN INTRO — structured-overview tables (key:value blocks)
+     detected and skipped in build_intro_summary.
+  3. JUNK REQ ITEMS — _is_valid_req rejects stipend amounts, programme
+     description sentences, and marketing copy.
+  4. DUPLICATE #NowHiring IN HASHTAGS — pool deduped before sampling.
+  5. last_posted_time.txt DRY-SPELL — save_last_posted_time() was only
+     called on success; now also called at start if never existed so the
+     file is always initialised on first run.
+  6. POSTED.TXT KEY COLLISION — make_key now keeps more chars (100) and
+     does NOT strip the year, so different-year reposts are distinct.
+  7. GENERIC FALLBACK INTRO — when no good paragraph found, fallback now
+     constructs a proper sentence instead of leaving it empty-ish.
+  8. REQUIREMENTS: "Check the advert" fallback only used when truly empty.
 """
 
 import os, re, time, random, requests
@@ -211,7 +220,6 @@ _FORCE_UPPER = {
 }
 
 def fix_abbreviations(text):
-    """Fix common abbreviations to proper casing."""
     fixes = {
         r'\bSa\b': 'SA', r'\bNqf\b': 'NQF', r'\bTvet\b': 'TVET',
         r'\bSeta\b': 'SETA', r'\bNcv\b': 'NCV', r'\bWil\b': 'WIL',
@@ -288,9 +296,13 @@ def confirm_current_year(title, plain, pub_year=None):
 
 # ─────────────────────────────────────────────
 # HTML → PLAIN TEXT
+# FIX: nav/breadcrumbs stripped before converting
 # ─────────────────────────────────────────────
 
 def strip_html(html):
+    # Remove nav, footer, header, breadcrumb blocks entirely
+    html = re.sub(r'<(nav|footer|header)[^>]*>.*?</(nav|footer|header)>', '', html, flags=re.DOTALL|re.I)
+    # Remove script/style
     html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html, flags=re.DOTALL|re.I)
     html = re.sub(r'<(br|p|div|h[1-6]|section|article|header|footer|nav)[^>]*>', '\n', html, flags=re.I)
     html = re.sub(r'</(p|div|h[1-6]|section|article|header|footer|nav)>', '\n', html, flags=re.I)
@@ -350,6 +362,15 @@ _NOT_REQ = re.compile(
     re.I
 )
 
+# FIX: block stipend/money amounts and marketing sentences from requirements
+_NOT_REQ_EXTRA = re.compile(
+    r'(monthly\s+stipend|r\s*\d{3,}|per\s+month|is\s+a\s+structured|'
+    r'programme\s+is\s+|this\s+(learnership|internship|programme)|'
+    r'south\s+africa.{0,30}unemployment|unemployment\s+crisis|'
+    r'often\s+hear|entry.level\s+jobs)',
+    re.I
+)
+
 _REQ_SIGNAL = re.compile(
     r'(grade|matric|diploma|degree|certificate|nqf|ncv|n3|n4|n5|n6|'
     r'years?\s+of\s+experience|years?\s+experience|experience|'
@@ -358,7 +379,7 @@ _REQ_SIGNAL = re.compile(
     r'driver[\'s]?\s+licen[sc]e|licence|computer\s+(literate|skills?)|'
     r'reside|resident|living\s+in|based\s+in|municipality|'
     r'must\s+(be|have|hold)|you\s+(must|need\s+to|should\s+have)|'
-    r'minimum|required|essential|advantageous|stipend|affidavit|'
+    r'minimum|required|essential|advantageous|affidavit|'
     r'bank\s+(account|confirmation)|proof\s+of|certified\s+copy|'
     r'not\s+(currently\s+)?employed|no\s+(criminal|previous)|'
     r'physically\s+fit|own\s+transport|bilingual|fluent|proficient)',
@@ -390,6 +411,9 @@ def _is_valid_req(item):
         return False
     if _NOT_REQ.match(item):
         return False
+    # FIX: reject marketing/stipend sentences
+    if _NOT_REQ_EXTRA.search(item):
+        return False
     if not _REQ_SIGNAL.search(item):
         if not re.match(r'^(must\s+|you\s+must\s+|applicants?\s+must\s+)', item, re.I):
             return False
@@ -404,10 +428,6 @@ def _truncate_at_word(text, max_chars=90):
 
 
 def extract_top_requirements(html_content, plain_text, max_items=6):
-    """
-    Extract up to max_items real requirement lines from the advert.
-    Increased to 6 to capture full requirement lists like in the screenshots.
-    """
     items = []
 
     if BS4_AVAILABLE:
@@ -579,7 +599,9 @@ _KNOWN_COMPANIES = re.compile(
     r'SASSA|NECSA|Samancor|Motus|Adidas|Cashbuild|Kia\s+(?:SA|South\s+Africa)|'
     r'South\s+West\s+Gauteng\s+TVET\s+College|SWGC|Transnet|Eskom|Telkom|'
     r'Foschini|TFG|BCE\s+Food\s+Service|Umuzi|Kimberly\s+Clark|'
-    r'Department\s+of\s+Water\s+and\s+Sanitation|SAPS|SANDF)\b',
+    r'Department\s+of\s+Water\s+and\s+Sanitation|SAPS|SANDF|'
+    r'Nedbank|OUTsurance|Outsurance|W&RSETA|WRSETA|De\s+Beers|Trollope|'
+    r'Joburg\s+City\s+Theatres?|IEC|Electoral\s+Commission)\b',
     re.I
 )
 
@@ -612,7 +634,8 @@ _VALID_LOCATION = re.compile(
     r'Sasolburg|Secunda|Welkom|Vanderbijlpark|Vereeniging|Alberton|Benoni|'
     r'Boksburg|Roodepoort|Krugersdorp|Mpumalanga|Limpopo|Gauteng|Florida|'
     r'Western\s+Cape|KwaZulu[- ]Natal|North\s+West|Northern\s+Cape|'
-    r'Eastern\s+Cape|Free\s+State|South\s+Africa|Molapo|George\s+Tabor)\b',
+    r'Eastern\s+Cape|Free\s+State|South\s+Africa|Molapo|George\s+Tabor|'
+    r'Tembisa|Kempton\s+Park|Centurion|Kwa[Zz]ulu|Phumani|Phungula)\b',
     re.I
 )
 
@@ -641,6 +664,25 @@ def clean_location(val):
         if not _JUNK_LOCATION.search(val):
             return val
     return None
+
+
+# ─────────────────────────────────────────────
+# TABLE/OVERVIEW BLOCK DETECTION
+# FIX: detect structured key:value table dumps so they're not used as intro
+# ─────────────────────────────────────────────
+
+_TABLE_PATTERN = re.compile(
+    r'(Position|Company|Duration|Reference|Department|Vacancy|Closing\s+Date|'
+    r'Application\s+Email|Citizenship|Industry|Training\s+Type|Age\s+Requirement)'
+    r'\s{0,5}[:\-–]\s{0,5}\S',
+    re.I
+)
+
+
+def _is_table_dump(text):
+    """Return True if text looks like a key:value overview table, not a natural sentence."""
+    matches = len(_TABLE_PATTERN.findall(text))
+    return matches >= 2
 
 
 # ─────────────────────────────────────────────
@@ -686,6 +728,7 @@ def extract_article_details(url, title="", pub_year=None):
             r'[Pp]rovince\s*[:\-]\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Bb]ased\s+[Ii]n\s*[:\-]?\s*([A-Za-z][^\n\r|,\.]{3,40})',
             r'[Cc]ampus(?:es)?\s*[:\-]?\s*([A-Za-z][^\n\r|,\.]{3,80})',
+            r'[Tt]argeted?\s+[Aa]rea\s*[:\-]?\s*([A-Za-z][^\n\r|,\.]{3,80})',
         ]:
             m = re.search(pat, plain, re.I)
             if m:
@@ -713,7 +756,7 @@ def extract_article_details(url, title="", pub_year=None):
 
         details["qual_tier"] = detect_qual_tier(qual or "", req_section or "")
 
-        # Requirements — up to 6 items to match full advert lists
+        # Requirements
         tier = details["qual_tier"]["tier"]
         req_items = extract_top_requirements(main_html, plain, max_items=6)
 
@@ -751,7 +794,6 @@ def extract_article_details(url, title="", pub_year=None):
         else:
             details["opp_type"] = "opportunity"
 
-        # Store plain_text for use in build_post intro summary
         details["plain_text"] = plain
 
         print(f"   Fields: {[k for k in details if k not in ('closing_date_obj','qual_tier','req_items','plain_text')]}")
@@ -788,25 +830,43 @@ def _filter_req_by_tier(req_items, tier):
 
 
 # ─────────────────────────────────────────────
-# INTRO SUMMARISER
-# Produces a faithful 2–3 sentence summary from the actual advert body.
-# This matches the screenshot style: what the programme is, who runs it,
-# what it offers — NOT a randomly picked template.
+# INTRO SUMMARISER  (v20)
+# FIX: breadcrumb lines and table dumps are rejected.
+# FIX: "Home/Opportunities/Jobs/..." navigation lines blocked.
 # ─────────────────────────────────────────────
 
+# Patterns that indicate a breadcrumb / nav line
+_BREADCRUMB = re.compile(
+    r'^(Home\s*/|Home\s*[»>]|Opportunities\s*/|Jobs\s*/|'
+    r'Home\s*[|]\s*Opportunities|Quick\s+Overview)',
+    re.I
+)
+
+# Patterns that indicate a single-sentence job-purpose statement, not a programme description
+_PURPOSE_ONLY = re.compile(
+    r'^To\s+(assist|support|implement|provide|ensure|manage|oversee|'
+    r'coordinate|facilitate|develop|maintain)',
+    re.I
+)
+
+
 def build_intro_summary(plain_text, title, opp_type, company, qual_display, location=""):
-    """
-    Extract a clean 2–3 sentence intro directly from the advert body.
-    Falls back to a factual constructed sentence if nothing usable found.
-    """
-    # Try to find a genuine descriptive paragraph near the top of the article
-    paragraphs = re.split(r'\n{2,}', plain_text[:5000])
+    paragraphs = re.split(r'\n{2,}', plain_text[:6000])
     candidates = []
-    for para in paragraphs[:15]:
+    for para in paragraphs[:20]:
         para = re.sub(r'\s+', ' ', para).strip()
-        if len(para) < 50 or len(para) > 700:
+        if len(para) < 60 or len(para) > 700:
             continue
-        # Skip headings, requirement sections, bullet lines, navigation
+        # FIX: reject breadcrumbs and nav lines
+        if _BREADCRUMB.search(para):
+            continue
+        # FIX: reject table/overview dumps
+        if _is_table_dump(para):
+            continue
+        # FIX: reject single-purpose sentences (job purpose ≠ programme description)
+        if _PURPOSE_ONLY.match(para) and len(para) < 180:
+            continue
+        # Skip heading-like openers
         if re.match(
             r'^(requirements?|qualification|how to apply|about|overview|'
             r'documents?|closing|apply|location|note:|nb:|duties|'
@@ -818,24 +878,23 @@ def build_intro_summary(plain_text, title, opp_type, company, qual_display, loca
             continue
         if is_junk(para):
             continue
-        # Must contain a descriptive verb — signs of a real programme description
+        # Must have a descriptive verb
         if re.search(
             r'\b(is|are|offers?|provides?|invit|open|accept|design|aim|equip|'
             r'allow|enable|give|gain|earn|require|seek|looking|currently|'
             r'partnership|initiative|programme|intended|targeted|eligible|'
-            r'opportunity|experience|practical|workplace|stipend|training)\b',
+            r'opportunity|experience|practical|workplace|stipend|training|'
+            r'unemployed|youth|candidate|applicant|graduate)\b',
             para, re.I
         ):
             candidates.append(para)
 
     if candidates:
-        # Pick the most informative candidate (longest under 500 chars)
         best = max(
             (c for c in candidates if len(c) <= 500),
             key=len,
             default=candidates[0]
         )
-        # Limit to 3 sentences
         sentences = re.split(r'(?<=[.!?])\s+', best.strip())
         intro = ' '.join(sentences[:3]).strip()
         if len(intro) >= 60:
@@ -850,21 +909,24 @@ def build_intro_summary(plain_text, title, opp_type, company, qual_display, loca
         "job":            "Vacancy",
     }.get(opp_type, "Opportunity")
 
-    if company and company.lower() not in ("this company",):
-        intro = f"Applications are open for the {company} {opp_label} for {CURRENT_YEAR}."
-    else:
-        intro = f"A {opp_label} is currently open for applications for {CURRENT_YEAR}."
+    loc_str = f" in {location}" if location and location.lower() not in ("south africa",) else ""
 
-    if qual_display and "matric" not in qual_display.lower():
-        intro += f" Minimum qualification: {qual_display}."
+    if company and company.lower() not in ("this company",):
+        intro = f"Applications are open for the {company} {opp_label}{loc_str} for {CURRENT_YEAR}."
     else:
-        intro += " No prior experience required — Matric is enough to apply."
+        intro = f"A {opp_label} is currently open for applications{loc_str} for {CURRENT_YEAR}."
+
+    if qual_display and qual_display.lower() not in ("grade 12 (matric)",):
+        intro += f" Minimum qualification required: {qual_display}."
+    else:
+        intro += " Matric (Grade 12) is the minimum — no prior work experience needed."
 
     return intro
 
 
 # ─────────────────────────────────────────────
-# HASHTAG PICKER
+# HASHTAG PICKER  (v20 — deduped pool)
+# FIX: removed duplicate #NowHiring from pools
 # ─────────────────────────────────────────────
 
 def _pick_hashtags(opp_type, tier):
@@ -874,19 +936,21 @@ def _pick_hashtags(opp_type, tier):
                 "#EntryLevelJobs", "#SAJobs", "#NowHiring", "#JobOpportunity"]
     elif opp_type == "internship":
         pool = ["#YouthEmployment", "#NowHiring", "#JobAlert", "#EntryLevelJobs",
-                "#Internship", "#JobOpportunity", "#SAJobs", "#NowHiring"]
+                "#Internship", "#JobOpportunity", "#SAJobs", "#GautengJobs"]
     elif opp_type == "apprenticeship":
         pool = ["#Apprenticeship", "#YouthEmployment", "#SAJobs",
                 "#NowHiring", "#JobOpportunity", "#MatricJobs", "#JobAlert", "#EntryLevelJobs"]
     elif opp_type == "job":
         pool = ["#JobAlert", "#Grade10Jobs", "#GeneralWorker",
-                "#MatricJobs", "#NowHiring", "#EntryLevelJobs", "#SAJobs", "#NowHiring"]
+                "#MatricJobs", "#NowHiring", "#EntryLevelJobs", "#SAJobs", "#WorkInSA"]
     elif tier == "degree":
         pool = ["#YouthEmployment", "#GraduateJobs", "#NowHiring",
                 "#JobOpportunity", "#SAJobs", "#Internship", "#EntryLevelJobs"]
     else:
         pool = ["#YouthEmployment", "#NowHiring", "#JobAlert", "#EntryLevelJobs",
                 "#Learnership", "#MatricJobs", "#SAJobs", "#JobOpportunity"]
+    # Deduplicate pool before sampling
+    pool = list(dict.fromkeys(pool))
     selected = random.sample(pool, min(5, len(pool)))
     return " ".join(base + selected)
 
@@ -903,26 +967,7 @@ _CLOSING_LINES = [
 
 
 # ─────────────────────────────────────────────
-# POST BUILDER — faithful advert summary style
-#
-# Matches your screenshot structure exactly:
-#
-#   🚨🎯 [2–3 sentence summary from the actual advert body]
-#
-#   Requirements:
-#   ✅ Requirement 1
-#   ✅ Requirement 2
-#   ✅ Requirement 3  (up to 6 items)
-#
-#   📍 Location
-#   📅 Closing date: DD Month YYYY
-#
-#   Apply here 👇
-#   [URL]
-#
-#   [Closing line]
-#
-#   #Hashtags
+# POST BUILDER
 # ─────────────────────────────────────────────
 
 def build_post(title, details, direct_url, source, plain_text=""):
@@ -940,7 +985,6 @@ def build_post(title, details, direct_url, source, plain_text=""):
     tier         = qual_tier["tier"]
     company      = extract_company(title)
 
-    # ── Intro: 2–3 sentences sourced from the actual advert body ─────────
     intro = build_intro_summary(
         plain_text=plain_text,
         title=title,
@@ -950,7 +994,6 @@ def build_post(title, details, direct_url, source, plain_text=""):
         location=location,
     )
 
-    # ── Assemble post ────────────────────────────────────────────────────
     lines = [f"🚨🎯 {intro}"]
     lines.append("")
 
@@ -959,8 +1002,9 @@ def build_post(title, details, direct_url, source, plain_text=""):
         for item in req_items:
             lines.append(f"✅ {item}")
     else:
+        # FIX: only show qual_display if it's specific; otherwise honest fallback
         lines.append(f"✅ {qual_display}")
-        lines.append("✅ Check the advert for full details")
+        lines.append("✅ See the full advert for all requirements")
 
     lines.append("")
 
@@ -1028,11 +1072,14 @@ def save_posted(key):
 
 
 def make_key(title):
+    """
+    FIX v20: keep year in key so same job in different year is not deduped.
+    Also use 100 chars to reduce collision risk on long similar titles.
+    """
     t = title.lower()
-    t = re.sub(r'\b20\d{2}\b', '', t)
     t = re.sub(r'[^a-z0-9 ]', ' ', t)
     t = re.sub(r'\s+', ' ', t).strip()
-    return t[:80]
+    return t[:100]
 
 
 def make_url_key(url):
@@ -1260,6 +1307,7 @@ def fetch_all_listings():
 
 # ─────────────────────────────────────────────
 # MAIN
+# FIX: last_posted_time.txt initialised on first run so dry-spell works
 # ─────────────────────────────────────────────
 
 LAST_POSTED_FILE = "last_posted_time.txt"
@@ -1270,9 +1318,15 @@ def save_last_posted_time():
         f.write(datetime.now().isoformat())
 
 
+def init_last_posted_file():
+    """Create the file on first run so dry-spell detection works from next run."""
+    if not os.path.exists(LAST_POSTED_FILE):
+        save_last_posted_time()
+        print("ℹ️  Initialised last_posted_time.txt for dry-spell tracking.\n")
+
+
 def check_dry_spell():
     if not os.path.exists(LAST_POSTED_FILE):
-        print("ℹ️  No last-posted record yet.\n")
         return
     try:
         with open(LAST_POSTED_FILE) as f:
@@ -1283,15 +1337,17 @@ def check_dry_spell():
             print(f"   Last posted: {last.strftime('%Y-%m-%d %H:%M')}")
             print(f"   Sources may be blocked or have no new content.\n")
         else:
-            print(f"🕐 Last posted: {last.strftime('%Y-%m-%d %H:%M')} ({hours_ago:.0f}h ago)\n")
+            print(f"🕐 Last posted: {last.strftime('%Y-%m-%d %H:%M')} ({hours_ago:.1f}h ago)\n")
     except Exception:
         pass
 
 
 def main():
-    print(f"\n🤖 Kara Job Updates — Job Bot v19 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n🤖 Kara Job Updates — Job Bot v20 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✅ lxml" if LXML_AVAILABLE else "⚠️  no lxml")
     print("✅ BeautifulSoup\n" if BS4_AVAILABLE else "⚠️  no BeautifulSoup — plain-text fallback\n")
+
+    init_last_posted_file()  # FIX: always initialise timestamp file
 
     already_posted = load_posted()
     print(f"📋 Already posted: {len(already_posted)} jobs")
